@@ -1,0 +1,2110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="Kabul" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="theme-color" content="#7a563a" />
+<title>Kabul</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.4/babel.min.js"></script>
+<style>
+  html, body { margin:0; padding:0; background:#7a563a; }
+  body { -webkit-tap-highlight-color: transparent; overscroll-behavior: none; }
+  * { -webkit-user-select: none; user-select: none; }
+  input { -webkit-user-select: text; user-select: text; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+
+const { useState, useEffect, useRef } = React;
+
+function Icon({ size = 16, className, style, children }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+         strokeLinejoin="round" className={className} style={style}>{children}</svg>
+  );
+}
+const Copy = (p) => <Icon {...p}><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></Icon>;
+const Users = (p) => <Icon {...p}><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></Icon>;
+const LogOut = (p) => <Icon {...p}><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></Icon>;
+const Trophy = (p) => <Icon {...p}><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></Icon>;
+const Check = (p) => <Icon {...p}><polyline points="20 6 9 17 4 12"/></Icon>;
+const Info = (p) => <Icon {...p}><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></Icon>;
+const Layers = (p) => <Icon {...p}><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.91a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></Icon>;
+
+/* ================================================================
+   Peer-to-peer transport. Two phones connect directly to each other;
+   a free public matchmaking server introduces them, then all game
+   traffic is device-to-device. No accounts, no database.
+   The host's room code doubles as its address on the network.
+   ================================================================ */
+const PEER_PREFIX = "kabul-room-2f7a-";
+
+let peer = null;
+let conns = [];
+let netRoom = null;
+let netStatus = "idle"; // idle | connecting | open | peer-joined | lost
+
+function netBroadcast(state) {
+  conns.forEach((c) => { try { if (c.open) c.send({ type: "state", state }); } catch (e) {} });
+}
+
+function attachConn(conn, isHost) {
+  conns.push(conn);
+  netStatus = "peer-joined";
+  conn.on("data", (msg) => {
+    if (!msg) return;
+    if (msg.type === "state" && msg.state) {
+      // last write wins, same as before — but arriving instantly
+      if (!netRoom || (msg.state.version || 0) >= (netRoom.version || 0)) netRoom = msg.state;
+    } else if (msg.type === "request" && netRoom) {
+      try { conn.send({ type: "state", state: netRoom }); } catch (e) {}
+    }
+  });
+  conn.on("close", () => {
+    conns = conns.filter((c) => c !== conn);
+    netStatus = "lost";
+  });
+  conn.on("error", () => {
+    conns = conns.filter((c) => c !== conn);
+    netStatus = "lost";
+  });
+  if (isHost && netRoom) { try { conn.send({ type: "state", state: netRoom }); } catch (e) {} }
+}
+
+function netTeardown() {
+  try { conns.forEach((c) => c.close()); } catch (e) {}
+  try { if (peer) peer.destroy(); } catch (e) {}
+  conns = []; peer = null; netRoom = null; netStatus = "idle";
+}
+
+function hostRoom(code, state) {
+  return new Promise((resolve, reject) => {
+    netTeardown();
+    netStatus = "connecting";
+    peer = new Peer(PEER_PREFIX + code, { debug: 0 });
+    const guard = setTimeout(() => reject(new Error("timeout")), 15000);
+    peer.on("open", () => {
+      clearTimeout(guard);
+      netRoom = { ...state, version: 1 };
+      netStatus = "open";
+      resolve(netRoom);
+    });
+    peer.on("connection", (conn) => {
+      conn.on("open", () => attachConn(conn, true));
+    });
+    peer.on("error", (e) => {
+      clearTimeout(guard);
+      reject(e);
+    });
+  });
+}
+
+function joinRoom(code) {
+  return new Promise((resolve, reject) => {
+    netTeardown();
+    netStatus = "connecting";
+    peer = new Peer(undefined, { debug: 0 });
+    const guard = setTimeout(() => reject(new Error("timeout")), 15000);
+    peer.on("open", () => {
+      const conn = peer.connect(PEER_PREFIX + code, { reliable: true });
+      conn.on("open", () => {
+        attachConn(conn, false);
+        try { conn.send({ type: "request" }); } catch (e) {}
+        const t0 = Date.now();
+        const iv = setInterval(() => {
+          if (netRoom) { clearInterval(iv); clearTimeout(guard); netStatus = "peer-joined"; resolve(netRoom); }
+          else if (Date.now() - t0 > 10000) { clearInterval(iv); clearTimeout(guard); reject(new Error("no-state")); }
+        }, 80);
+      });
+      conn.on("error", () => { clearTimeout(guard); reject(new Error("connect-failed")); });
+    });
+    peer.on("error", (e) => { clearTimeout(guard); reject(e); });
+  });
+}
+
+/* --- the three functions the game already calls, now peer-backed --- */
+async function readRoom() {
+  return netRoom;
+}
+
+async function writeRoom(state, writerId) {
+  const next = { ...state, version: (state.version || 0) + 1, lastWriter: writerId || null };
+  netRoom = next;
+  netBroadcast(next);
+  return next;
+}
+
+async function casUpdate(code, writerId, transform) {
+  const latest = netRoom;
+  if (!latest) return null;
+  const clone = JSON.parse(JSON.stringify(latest));
+  const draft = transform(clone);
+  if (!draft || draft === clone) return latest;
+  const next = { ...draft, version: (latest.version || 0) + 1, lastWriter: writerId };
+  netRoom = next;
+  netBroadcast(next);
+  return next;
+}
+
+
+/* ---------------------------------------------------------------- */
+/* Palette — warm lamplight: clay, walnut, wool and aged paper       */
+/* ---------------------------------------------------------------- */
+const C = {
+  felt: "#3d3029",      // warm walnut table
+  feltDark: "#2e241f",  // shadowed wood
+  feltDeep: "#221a16",  // the dim corners of the room
+  card: "#f2e8d8",      // aged paper
+  cardEdge: "#d6c6ae",
+  ink: "#3a2e26",       // soft brown ink, never pure black
+  gold: "#c08a4e",      // lamplight on brass
+  goldSoft: "#e8c48f",
+  red: "#a85a48",       // muted brick
+  black: "#4a3a30",     // warm charcoal
+  muted: "#f0dcc4",     // pale cream, reads against light oak
+  danger: "#9e5346",    // terracotta
+};
+
+/* The table: light oak under a low lamp. Layers, top to bottom —
+   1. two faint rings where mugs have sat
+   2. fine vertical grain, plus a few wider figure lines
+   3. a couple of soft knots
+   4. the lamp's pool of light, falling off to shadow at the edges
+   5. the base oak gradient                                            */
+const TABLE_BG = `
+  radial-gradient(circle at 21% 26%, transparent 0 40px, rgba(92,58,28,0.10) 40px 43px, transparent 43px),
+  radial-gradient(circle at 79% 72%, transparent 0 30px, rgba(92,58,28,0.075) 30px 32px, transparent 32px),
+  repeating-linear-gradient(92deg,
+    rgba(120,82,44,0.055) 0px, rgba(120,82,44,0.055) 1px,
+    transparent 1px, transparent 5px),
+  repeating-linear-gradient(90deg,
+    rgba(84,54,26,0.05) 0px, rgba(84,54,26,0.05) 2px,
+    transparent 2px, transparent 37px),
+  repeating-linear-gradient(90deg,
+    rgba(255,232,200,0.035) 0px, rgba(255,232,200,0.035) 3px,
+    transparent 3px, transparent 61px),
+  radial-gradient(ellipse 60px 16px at 33% 62%, rgba(96,62,30,0.16), transparent 70%),
+  radial-gradient(ellipse 120% 80% at 50% -5%, rgba(255,214,158,0.30), transparent 62%),
+  radial-gradient(ellipse 130% 95% at 50% 45%, rgba(190,140,88,0.26), transparent 72%),
+  linear-gradient(180deg, #8a6440 0%, #7a563a 45%, #55392a 100%)
+`;
+
+// a faint woven texture, layered under panel content
+const WEAVE = `
+  repeating-linear-gradient(45deg, rgba(255,240,220,0.018) 0px, rgba(255,240,220,0.018) 1px, transparent 1px, transparent 4px),
+  repeating-linear-gradient(-45deg, rgba(0,0,0,0.020) 0px, rgba(0,0,0,0.020) 1px, transparent 1px, transparent 4px)
+`;
+
+const roomStyle = { background: TABLE_BG, backgroundColor: "#7a563a" };
+
+/* ---------------------------------------------------------------- */
+/* Deck                                                              */
+/* ---------------------------------------------------------------- */
+const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
+const RED_VALUES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, -1, -2];
+const BLACK_VALUES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 10, 10];
+const BLACK_EFFECTS = [null, null, null, null, null, null, "view-own", "view-own", "view-opp", "view-opp", "blind-swap", "view1-swap", "view2-swap"];
+// red suits share the 7-10 powers, but red face cards have no effect (they're the scoring cards)
+const RED_EFFECTS = [null, null, null, null, null, null, "view-own", "view-own", "view-opp", "view-opp", null, null, null];
+const SUIT_SYMBOL = { Hearts: "♥", Diamonds: "♦", Clubs: "♣", Spades: "♠" };
+
+const EFFECT_LABELS = {
+  "view-own": "Peek at one of your own cards",
+  "view-opp": "Peek at one of your opponent's cards",
+  "blind-swap": "Blind swap — trade a card with theirs, unseen",
+  "view1-swap": "Peek one of their cards, then swap one of yours for one of theirs",
+  "view2-swap": "Peek two of their cards, then swap one of yours for one of theirs",
+};
+
+function buildDeck() {
+  const deck = [];
+  let uid = 0;
+  ["Hearts", "Diamonds"].forEach((suit) => {
+    RANKS.forEach((rank, i) => {
+      deck.push({ id: `c${uid++}`, rank, suit, color: "red", value: RED_VALUES[i], effect: RED_EFFECTS[i] });
+    });
+  });
+  ["Clubs", "Spades"].forEach((suit) => {
+    RANKS.forEach((rank, i) => {
+      deck.push({ id: `c${uid++}`, rank, suit, color: "black", value: BLACK_VALUES[i], effect: BLACK_EFFECTS[i] });
+    });
+  });
+  return deck;
+}
+
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+/* ---------------------------------------------------------------- */
+/* Room state helpers                                                */
+/* ---------------------------------------------------------------- */
+const ROOM_KEY = (code) => `kabul-room-${code}`;
+const BOT_SLOT = "p2";
+
+function generateCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let s = "";
+  for (let i = 0; i < 4; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
+
+function newRoomState(code, hostName) {
+  return {
+    code,
+    version: 1,
+    phase: "lobby",
+    round: 1,
+    players: [
+      { slot: "p1", name: hostName || "Player 1", connected: true, grid: [], ready: false, score: 0, roundScores: [] },
+      { slot: "p2", name: null, connected: false, grid: [], ready: false, score: 0, roundScores: [] },
+    ],
+    drawPile: [],
+    discardPile: [],
+    turn: "p1",
+    drawnCard: null,
+    drawnBy: null,
+    pendingEffect: null,
+    pendingGive: null,
+    kabulCalledBy: null,
+    kabulWindow: null,
+    finalTurnTaken: false,
+    roundResult: null,
+    lastMove: null,
+    botKnown: {},
+    firstDiscardDone: false,
+    botTurns: 0,
+    log: ["Room created. Share the code with your friend."],
+  };
+}
+
+function dealRound(state) {
+  const deck = shuffle(buildDeck());
+  const p1grid = [deck.pop(), deck.pop(), deck.pop(), deck.pop()];
+  const p2grid = [deck.pop(), deck.pop(), deck.pop(), deck.pop()];
+  const discardTop = deck.pop();
+  return {
+    ...state,
+    phase: "peek",
+    players: state.players.map((p, i) => ({ ...p, grid: i === 0 ? p1grid : p2grid, ready: false })),
+    drawPile: deck,
+    discardPile: [discardTop],
+    turn: state.round % 2 === 1 ? "p1" : "p2",
+    drawnCard: null,
+    drawnBy: null,
+    pendingEffect: null,
+    pendingGive: null,
+    kabulCalledBy: null,
+    kabulWindow: null,
+    finalTurnTaken: false,
+    roundResult: null,
+    lastMove: null,
+    // the bot "peeks" its own bottom two cards too, same as a human would
+    botKnown: { [p2grid[2].id]: true, [p2grid[3].id]: true },
+    firstDiscardDone: false,
+    botTurns: 0,
+    log: [...state.log, `Round ${state.round} dealt — peek at your bottom two cards.`],
+  };
+}
+
+function ensureDraw(state) {
+  let drawPile = [...state.drawPile];
+  let discardPile = [...state.discardPile];
+  if (drawPile.length === 0 && discardPile.length > 1) {
+    const top = discardPile[discardPile.length - 1];
+    drawPile = shuffle(discardPile.slice(0, -1));
+    discardPile = [top];
+  }
+  return { drawPile, discardPile };
+}
+
+function nameOf(state, slot) {
+  const p = state.players.find((p) => p.slot === slot);
+  return (p && p.name) || (slot === "p1" ? "Player 1" : "Player 2");
+}
+
+function gridTotal(grid) {
+  return grid.reduce((s, c) => s + (c ? c.value : 0), 0);
+}
+
+function computeRoundResult(state) {
+  const [p1, p2] = state.players;
+  const t1 = gridTotal(p1.grid), t2 = gridTotal(p2.grid);
+  const callerSlot = state.kabulCalledBy;
+  const callerTotal = callerSlot === "p1" ? t1 : t2;
+  const otherTotal = callerSlot === "p1" ? t2 : t1;
+  let callerHasLowest;
+  if (callerTotal < otherTotal) callerHasLowest = true;
+  else if (callerTotal > otherTotal) callerHasLowest = false;
+  else {
+    const callerGrid = (callerSlot === "p1" ? p1.grid : p2.grid).filter(Boolean).map((c) => c.value).sort((a, b) => a - b);
+    const otherGrid = (callerSlot === "p1" ? p2.grid : p1.grid).filter(Boolean).map((c) => c.value).sort((a, b) => a - b);
+    callerHasLowest = true;
+    for (let i = 0; i < Math.max(callerGrid.length, otherGrid.length); i++) {
+      const a = callerGrid[i] ?? Infinity, b = otherGrid[i] ?? Infinity;
+      if (a < b) { callerHasLowest = true; break; }
+      if (a > b) { callerHasLowest = false; break; }
+    }
+  }
+  const bonus = { p1: 0, p2: 0 };
+  if (callerHasLowest) bonus[callerSlot] = -10;
+  else {
+    bonus[callerSlot] = 5;
+    bonus[callerSlot === "p1" ? "p2" : "p1"] = -5;
+  }
+  return { t1, t2, bonus, roundScoreP1: t1 + bonus.p1, roundScoreP2: t2 + bonus.p2, callerHasLowest };
+}
+
+function finalizeRound(state) {
+  const result = computeRoundResult(state);
+  const players = state.players.map((p) => {
+    const rs = p.slot === "p1" ? result.roundScoreP1 : result.roundScoreP2;
+    return { ...p, score: p.score + rs, roundScores: [...p.roundScores, rs] };
+  });
+  return {
+    ...state,
+    players,
+    phase: "round-end",
+    roundResult: result,
+    log: [...state.log, `Round ${state.round} is over.`],
+  };
+}
+
+/* ---------------------------------------------------------------- */
+/* Bot heuristics (used only in local practice mode)                 */
+/* ---------------------------------------------------------------- */
+function botDecideDraw(state) {
+  const top = state.discardPile[state.discardPile.length - 1];
+  return top && top.value <= 3 ? "discard" : "deck";
+}
+
+function botPlanAfterDraw(botGrid, drawn) {
+  const known = botGrid.map((c, i) => (c ? { i, v: c.value } : null)).filter(Boolean);
+  if (known.length === 0) return { action: "discard" };
+  const worst = known.reduce((a, b) => (b.v > a.v ? b : a));
+  if (drawn.value < worst.v) return { action: "swap", idx: worst.i };
+  return { action: "discard" };
+}
+
+function botShouldCallKabul(grid) {
+  const total = gridTotal(grid);
+  if (total <= 4) return Math.random() < 0.7;
+  if (total <= 8) return Math.random() < 0.25;
+  return Math.random() < 0.05;
+}
+
+/* ---------------------------------------------------------------- */
+/* UI bits                                                           */
+/* ---------------------------------------------------------------- */
+/* A size-agnostic card face, used by both PlayingCard and flying ghost cards */
+function CardFace({ card, faceUp }) {
+  const isRed = card && card.color === "red";
+  return (
+    <div
+      style={{
+        width: "100%", height: "100%", borderRadius: "0.75rem",
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+        background: faceUp
+          ? `linear-gradient(160deg, #f7efe1, ${C.card})`
+          : `linear-gradient(150deg, #5c4638, #3b2d25)`,
+        border: `1px solid ${faceUp ? C.cardEdge : "rgba(192,138,78,0.55)"}`,
+        boxShadow: "0 10px 24px rgba(20,12,8,0.45)",
+      }}
+    >
+      {faceUp && card ? (
+        <>
+          <span className="font-serif font-bold leading-none" style={{ color: isRed ? C.red : C.black, fontSize: "1.1em" }}>{card.rank}</span>
+          <span className="leading-none" style={{ color: isRed ? C.red : C.black }}>{SUIT_SYMBOL[card.suit]}</span>
+        </>
+      ) : (
+        <svg viewBox="0 0 24 24" width="52%" height="52%" style={{ opacity: 0.7 }}>
+          <path d="M12 2.5 L21.5 12 L12 21.5 L2.5 12 Z" fill="none" stroke={C.goldSoft} strokeWidth="0.7" />
+          <path d="M12 6 L18 12 L12 18 L6 12 Z" fill={C.gold} opacity="0.55" />
+          <circle cx="12" cy="12" r="1.6" fill={C.goldSoft} />
+        </svg>
+      )}
+    </div>
+  );
+}
+
+const FLIGHT_MS = 620;
+// after finishing a move, the mover keeps a short window to still call Kabul
+const KABUL_WINDOW_MS = 2000;
+
+// grants the player who just moved a brief chance to still call Kabul
+function openKabulWindow(state, slot) {
+  if (state.phase !== "playing" || state.kabulCalledBy) return null;
+  return { slot, expires: Date.now() + KABUL_WINDOW_MS };
+}
+
+function Flight({ flight, onDone }) {
+  const [pos, setPos] = useState({ left: flight.from.left, top: flight.from.top });
+  useEffect(() => {
+    const raf = requestAnimationFrame(() =>
+      requestAnimationFrame(() => setPos({ left: flight.to.left, top: flight.to.top }))
+    );
+    const t = setTimeout(onDone, FLIGHT_MS + 80);
+    return () => { cancelAnimationFrame(raf); clearTimeout(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // horizontal travel gets an ease-in-out so it never looks like it is being
+  // dragged through the piles; vertical uses a softer curve so arcs read cleanly
+  const travel = `left ${FLIGHT_MS}ms cubic-bezier(.45,.02,.25,1), top ${FLIGHT_MS}ms cubic-bezier(.4,.1,.25,1)`;
+
+  return (
+    <div
+      style={{
+        position: "fixed", left: pos.left, top: pos.top,
+        width: flight.from.width, height: flight.from.height,
+        transition: travel,
+        zIndex: 60, pointerEvents: "none",
+      }}
+    >
+      {/* the lift: card rises above the table, clears the piles, settles down */}
+      <div style={{ width: "100%", height: "100%", animation: `kabulArc ${FLIGHT_MS}ms cubic-bezier(.4,.1,.25,1) both` }}>
+        <CardFace card={flight.card} faceUp={flight.faceUp} />
+      </div>
+      {/* a soft shadow on the table that widens as the card rises */}
+      <div
+        style={{
+          position: "absolute", left: "8%", right: "8%", bottom: -6, height: 8,
+          borderRadius: "50%", background: "rgba(18,11,7,0.55)", filter: "blur(4px)",
+          animation: `kabulArcShadow ${FLIGHT_MS}ms cubic-bezier(.4,.1,.25,1) both`,
+          zIndex: -1,
+        }}
+      />
+    </div>
+  );
+}
+
+function PlayingCard({ card, faceUp, size = "md", onClick, dim, highlight, flash, anchor, selected }) {
+  const sizes = { sm: "w-11 h-16 text-xs", md: "w-16 h-24 text-base", lg: "w-24 h-36 text-2xl" };
+  if (!card) {
+    return <div ref={anchor} className={`${sizes[size]} rounded-xl border-2 border-dashed shrink-0`} style={{ borderColor: "rgba(192,138,78,0.22)" }} />;
+  }
+  const isRed = card.color === "red";
+  let boxShadow = "0 4px 10px rgba(20,12,8,0.38)";
+  if (selected) boxShadow = `0 0 0 3px ${C.goldSoft}, 0 0 20px 4px rgba(232,196,143,0.5), 0 10px 18px rgba(20,12,8,0.45)`;
+  else if (flash) boxShadow = `0 0 0 2px ${C.goldSoft}, 0 0 22px 6px rgba(232,196,143,0.45)`;
+  else if (highlight) boxShadow = `0 0 0 2px ${C.gold}, 0 4px 10px rgba(20,12,8,0.38)`;
+  return (
+    <button
+      ref={anchor}
+      onClick={onClick}
+      disabled={!onClick}
+      className={`${sizes[size]} rounded-xl flex flex-col items-center justify-center relative shrink-0 transition-transform ${onClick ? "active:scale-95" : ""}`}
+      style={{
+        background: faceUp
+          ? `linear-gradient(160deg, #f7efe1, ${C.card})`
+          : `linear-gradient(150deg, #5c4638, #3b2d25)`,
+        boxShadow,
+        border: `1px solid ${faceUp ? C.cardEdge : "rgba(192,138,78,0.5)"}`,
+        opacity: dim ? 0.4 : 1,
+        transform: selected ? "translateY(-6px)" : "translateY(0)",
+        transition: "box-shadow 200ms ease, opacity 320ms ease, transform 200ms cubic-bezier(.2,.8,.3,1)",
+        animation: flash ? "kabulSettle 340ms cubic-bezier(.2,.8,.3,1) both" : undefined,
+      }}
+    >
+      {faceUp ? (
+        <>
+          <span className="font-serif font-bold leading-none" style={{ color: isRed ? C.red : C.black }}>{card.rank}</span>
+          <span className="leading-none mt-1" style={{ color: isRed ? C.red : C.black }}>{SUIT_SYMBOL[card.suit]}</span>
+        </>
+      ) : (
+        <svg viewBox="0 0 24 24" width="52%" height="52%" style={{ opacity: 0.7 }}>
+          <path d="M12 2.5 L21.5 12 L12 21.5 L2.5 12 Z" fill="none" stroke={C.goldSoft} strokeWidth="0.7" />
+          <path d="M12 6 L18 12 L12 18 L6 12 Z" fill={C.gold} opacity="0.55" />
+          <circle cx="12" cy="12" r="1.6" fill={C.goldSoft} />
+        </svg>
+      )}
+    </button>
+  );
+}
+
+/* Keyframes for the reveal + modal transitions (injected once) */
+function AnimStyles() {
+  return (
+    <style>{`
+      @keyframes kabulScrimIn { from { opacity: 0 } to { opacity: 1 } }
+      @keyframes kabulSheetIn {
+        from { opacity: 0; transform: translateY(14px) scale(0.98) }
+        to   { opacity: 1; transform: translateY(0) scale(1) }
+      }
+      @keyframes kabulFlipIn {
+        0%   { transform: rotateY(90deg) scale(0.9); opacity: 0 }
+        55%  { transform: rotateY(-8deg) scale(1.02); opacity: 1 }
+        100% { transform: rotateY(0deg) scale(1); opacity: 1 }
+      }
+      @keyframes kabulSettle {
+        0%   { transform: scale(1.06) }
+        100% { transform: scale(1) }
+      }
+      /* the card lifts off the table, travels above the piles, and sets back down */
+      @keyframes kabulArc {
+        0%   { transform: translateY(0) scale(1); }
+        45%  { transform: translateY(-30px) scale(1.09); }
+        100% { transform: translateY(0) scale(1); }
+      }
+      /* --- shuffle: two halves riffle together, then cards deal out --- */
+      @keyframes kabulRiffleL {
+        0%   { transform: translateX(0) rotate(0deg) }
+        18%  { transform: translateX(-30px) rotate(-7deg) }
+        38%  { transform: translateX(-4px) rotate(-1deg) }
+        50%  { transform: translateX(0) rotate(0deg) }
+        68%  { transform: translateX(-26px) rotate(-6deg) }
+        86%  { transform: translateX(-3px) rotate(-1deg) }
+        100% { transform: translateX(0) rotate(0deg) }
+      }
+      @keyframes kabulRiffleR {
+        0%   { transform: translateX(0) rotate(0deg) }
+        18%  { transform: translateX(30px) rotate(7deg) }
+        38%  { transform: translateX(4px) rotate(1deg) }
+        50%  { transform: translateX(0) rotate(0deg) }
+        68%  { transform: translateX(26px) rotate(6deg) }
+        86%  { transform: translateX(3px) rotate(1deg) }
+        100% { transform: translateX(0) rotate(0deg) }
+      }
+      @keyframes kabulDealOut {
+        0%   { opacity: 0; transform: translate(0, 0) rotate(0deg) scale(0.92) }
+        12%  { opacity: 1 }
+        100% { opacity: 1; transform: translate(var(--dx), var(--dy)) rotate(var(--rot)) scale(1) }
+      }
+      @keyframes kabulShuffleOut {
+        to { opacity: 0 }
+      }
+      @keyframes kabulArcShadow {
+        0%   { opacity: 0.35; transform: scaleX(1); }
+        45%  { opacity: 0.16; transform: scaleX(1.25); }
+        100% { opacity: 0.35; transform: scaleX(1); }
+      }
+    `}</style>
+  );
+}
+
+const SHUFFLE_MS = 2000;
+
+/* Round-start shuffle: a stack riffles twice, then four cards deal out. */
+function ShuffleOverlay({ onDone }) {
+  useEffect(() => {
+    const t = setTimeout(onDone, SHUFFLE_MS);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const CARD_W = 64, CARD_H = 96;
+  // the riffling stack: alternating halves, offset a little so it reads as a deck
+  const stack = Array.from({ length: 10 });
+  // where the four dealt cards land (a 2x2, mirroring the player's grid)
+  const deals = [
+    { dx: "-38px", dy: "18px", rot: "-3deg" },
+    { dx: "38px", dy: "18px", rot: "2deg" },
+    { dx: "-38px", dy: "122px", rot: "2deg" },
+    { dx: "38px", dy: "122px", rot: "-2deg" },
+  ];
+
+  return (
+    <div
+      className="fixed inset-0 flex flex-col items-center justify-center"
+      style={{ background: "rgba(30,19,12,0.55)", zIndex: 70, animation: `kabulShuffleOut 320ms ease ${SHUFFLE_MS - 320}ms both` }}
+    >
+      <div style={{ position: "relative", width: CARD_W, height: CARD_H + 140 }}>
+        {/* the deck, riffling */}
+        {stack.map((_, i) => {
+          const isLeft = i % 2 === 0;
+          return (
+            <div
+              key={`s${i}`}
+              style={{
+                position: "absolute", left: 0, top: i * -0.8, width: CARD_W, height: CARD_H,
+                animation: `${isLeft ? "kabulRiffleL" : "kabulRiffleR"} 620ms cubic-bezier(.4,.05,.3,1) ${i * 18}ms 2 both, kabulShuffleOut 200ms ease 1240ms both`,
+              }}
+            >
+              <CardFace card={null} faceUp={false} />
+            </div>
+          );
+        })}
+        {/* then four cards deal into place */}
+        {deals.map((d, i) => (
+          <div
+            key={`d${i}`}
+            style={{
+              position: "absolute", left: 0, top: 0, width: CARD_W, height: CARD_H,
+              "--dx": d.dx, "--dy": d.dy, "--rot": d.rot,
+              animation: `kabulDealOut 420ms cubic-bezier(.25,.9,.3,1) ${1280 + i * 120}ms both`,
+            }}
+          >
+            <CardFace card={null} faceUp={false} />
+          </div>
+        ))}
+      </div>
+      <p className="font-serif text-lg mt-6" style={{ color: C.goldSoft }}>Shuffling…</p>
+    </div>
+  );
+}
+
+/* A card that flips open, used when peeking at your own or an opponent's card */
+function RevealCard({ card, delay = 0 }) {
+  return (
+    <div
+      style={{
+        animation: `kabulFlipIn 520ms cubic-bezier(.2,.75,.3,1) ${delay}ms both`,
+        transformStyle: "preserve-3d",
+        perspective: "600px",
+      }}
+    >
+      <PlayingCard card={card} faceUp size="lg" />
+    </div>
+  );
+}
+
+function Modal({ title, children, onClose, closeLabel = "Got it", z = 50 }) {
+  return (
+    <div
+      className="fixed inset-0 flex items-end sm:items-center justify-center p-4"
+      style={{ background: "rgba(24,16,12,0.72)", zIndex: z, animation: "kabulScrimIn 220ms ease both" }}
+    >
+      <div
+        className="w-full max-w-sm rounded-2xl p-5"
+        style={{
+          background: `linear-gradient(170deg, #f8f1e4, ${C.card})`,
+          color: C.ink,
+          boxShadow: "0 18px 50px rgba(15,9,6,0.55)",
+          border: "1px solid rgba(192,138,78,0.25)",
+          animation: "kabulSheetIn 300ms cubic-bezier(.2,.8,.3,1) both",
+        }}
+      >
+        {title && <h3 className="font-serif text-lg font-bold mb-3">{title}</h3>}
+        {children}
+        {onClose && (
+          <button onClick={onClose} className="mt-4 w-full py-2.5 rounded-xl font-semibold" style={{ background: `linear-gradient(180deg, #d09a5e, ${C.gold})`, color: "#2a1f18" }}>
+            {closeLabel}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function effectPrompt(flow) {
+  if (!flow) return null;
+  const key = `${flow.type}:${flow.stage}`;
+  const map = {
+    "view-own:pick": "Tap one of your own cards to peek at it.",
+    "view-opp:pick": "Tap one of your opponent's cards to peek at it.",
+    "blind-swap:pick-own": "Blind swap — tap one of your own cards.",
+    "blind-swap:pick-opp": "Now tap one of your opponent's cards to swap with.",
+    "view1-swap:pick-view": "Tap one of your opponent's cards to peek at it.",
+    "view1-swap:pick-own": "Now tap one of your own cards to swap.",
+    "view1-swap:pick-opp": "Now tap one of your opponent's cards to swap with.",
+    "view2-swap:pick-view": `Tap ${2 - (flow.viewed ? flow.viewed.length : 0)} more of your opponent's cards to peek at.`,
+    "view2-swap:pick-own": "Now tap one of your own cards to swap.",
+    "view2-swap:pick-opp": "Now tap one of your opponent's cards to swap with.",
+  };
+  return map[key] || null;
+}
+
+function CardGridStack({ cards, faceUp, size, onTap, slot, flashSet, anchorFor, selectedSet }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(2, max-content)", gap: "0.5rem", width: "fit-content", margin: "0 auto" }}>
+      {cards.map((c, i) => (
+        <PlayingCard
+          key={i} card={c} faceUp={faceUp} size={size}
+          onClick={c && onTap ? () => onTap(c, i) : undefined}
+          dim={!c}
+          flash={!!(flashSet && flashSet.has(`${slot}-${i}`))}
+          selected={!!(selectedSet && selectedSet.has(`${slot}-${i}`))}
+          anchor={anchorFor ? anchorFor(`${slot}-${i}`) : undefined}
+        />
+      ))}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------- */
+/* Main component                                                    */
+/* ---------------------------------------------------------------- */
+function KabulGame() {
+  const [screen, setScreen] = useState("home");
+  const [name, setName] = useState("");
+  const [joinCode, setJoinCode] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const [code, setCode] = useState("");
+  const [mySlot, setMySlot] = useState(null);
+  const [room, setRoom] = useState(null);
+  const [mode, setMode] = useState("online"); // 'online' | 'bot'
+  const pollRef = useRef(null);
+  const botStackSeenRef = useRef(null);
+
+  const [peekedIdx, setPeekedIdx] = useState([]);
+  const [stackMode, setStackMode] = useState(false);
+  const [effectFlow, setEffectFlow] = useState(null);
+  const [modal, setModal] = useState(null);
+  const [showRules, setShowRules] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [flashKeys, setFlashKeys] = useState(new Set());
+  const [nowTick, setNowTick] = useState(Date.now());
+  const [tapSelected, setTapSelected] = useState(null);
+  const tapTimerRef = useRef(null);
+  const [godMode, setGodMode] = useState(false);
+  const [shuffling, setShuffling] = useState(false);
+  const shuffledRoundRef = useRef(null);
+  const writerIdRef = useRef(`w${Math.random().toString(36).slice(2, 10)}`);
+  const flashTimerRef = useRef(null);
+  const anchorsRef = useRef({});
+  const [flights, setFlights] = useState([]);
+  const flightSeqRef = useRef(0);
+
+  const anchorFor = (key) => (el) => {
+    if (el) anchorsRef.current[key] = el;
+    else delete anchorsRef.current[key];
+  };
+
+  // positions as of the PREVIOUS commit, so we can still animate from a slot
+  // that has already been emptied or unmounted by the state change
+  const rectCacheRef = useRef({});
+
+  function rectOf(key) {
+    const el = anchorsRef.current[key];
+    if (el) {
+      const r = el.getBoundingClientRect();
+      if (r.width && r.height) return { left: r.left, top: r.top, width: r.width, height: r.height };
+    }
+    return rectCacheRef.current[key] || null;
+  }
+
+  useEffect(() => {
+    if (mode === "bot" || !code || !mySlot) return;
+    let cancelled = false;
+    async function tick() {
+      const r = await readRoom(code);
+      if (!cancelled && r) setRoom((prev) => (!prev || r.version > prev.version ? r : prev));
+    }
+    tick();
+    pollRef.current = setInterval(tick, 220);
+    return () => { cancelled = true; clearInterval(pollRef.current); };
+  }, [code, mySlot, mode]);
+
+  // a compact signature of the bits of room state that should wake the bot up
+  const botSig = room
+    ? [room.phase, room.turn, !!room.drawnCard, !!room.pendingEffect, !!room.pendingGive, room.discardPile.length, room.drawnBy, room.kabulCalledBy, room.players.find((p) => p.slot === BOT_SLOT)?.ready].join("|")
+    : "";
+
+  // animate cards flying between slots, then briefly highlight where they landed
+  useEffect(() => {
+    if (!room || !room.lastMove) return;
+    const lm = room.lastMove;
+
+    if (lm.flights && lm.flights.length) {
+      // measure before React paints the new state over the old positions
+      const launched = lm.flights
+        .map((f) => {
+          const from = rectOf(f.from);
+          const to = rectOf(f.to);
+          if (!from || !to) return null;
+          // a card is shown face up if it is public, or if this viewer is the
+          // one entitled to see it (their own draw)
+          const faceUp = !!f.faceUp || (!!f.faceUpFor && f.faceUpFor === mySlot);
+          return { id: `f${flightSeqRef.current++}`, card: f.card, faceUp, from, to };
+        })
+        .filter(Boolean);
+      if (launched.length) setFlights((prev) => [...prev, ...launched]);
+    }
+
+    const delay = lm.flights && lm.flights.length ? FLIGHT_MS : 0;
+    clearTimeout(flashTimerRef.current);
+    const t = setTimeout(() => {
+      setFlashKeys(new Set(lm.keys || []));
+      flashTimerRef.current = setTimeout(() => setFlashKeys(new Set()), 1800);
+    }, delay);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [room?.lastMove?.ts]);
+
+  // refresh the position cache after each commit (must run after the flight
+  // effect above, so that effect still sees the previous commit's positions)
+  useEffect(() => {
+    const next = {};
+    Object.keys(anchorsRef.current).forEach((k) => {
+      const r = anchorsRef.current[k].getBoundingClientRect();
+      if (r.width && r.height) next[k] = { left: r.left, top: r.top, width: r.width, height: r.height };
+    });
+    rectCacheRef.current = next;
+  });
+
+  useEffect(() => {
+    if (room && room.pendingEffect && room.pendingEffect.by === mySlot && !effectFlow) {
+      const e = room.pendingEffect.effect;
+      const stageMap = { "view-own": "pick", "view-opp": "pick", "blind-swap": "pick-own", "view1-swap": "pick-view", "view2-swap": "pick-view" };
+      setEffectFlow({ type: e, stage: stageMap[e], viewed: [] });
+    }
+    if (room && !room.pendingEffect && effectFlow) setEffectFlow(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [room?.pendingEffect]);
+
+  // if a give is owed but the giver has no cards left, clear it so play continues
+  useEffect(() => {
+    if (!room || !room.pendingGive || room.pendingGive.from !== mySlot) return;
+    const mine = room.players.find((p) => p.slot === mySlot);
+    if (mine && !mine.grid.some(Boolean)) {
+      updateRoom((s) => (s.pendingGive && s.pendingGive.from === mySlot
+        ? { ...s, pendingGive: null, log: [...s.log, `${nameOf(s, mySlot)} had no cards left to hand over.`] }
+        : s));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [room?.pendingGive]);
+
+  // play the shuffle once per freshly dealt round
+  useEffect(() => {
+    if (!room || room.phase !== "peek") return;
+    const key = `${room.code}-${room.round}`;
+    if (shuffledRoundRef.current === key) return;
+    shuffledRoundRef.current = key;
+    setShuffling(true);
+  }, [room?.phase, room?.round, room?.code]);
+
+  // keep the Kabul window counting down on screen while it is open
+  useEffect(() => {
+    if (!room || !room.kabulWindow) return;
+    setNowTick(Date.now());
+    const id = setInterval(() => setNowTick(Date.now()), 150);
+    return () => clearInterval(id);
+  }, [room?.kabulWindow?.expires]);
+
+  async function updateRoom(transform) {
+    if (mode === "bot") {
+      setRoom((prev) => {
+        if (!prev) return prev;
+        const draft = transform(JSON.parse(JSON.stringify(prev)));
+        return draft || prev;
+      });
+      return;
+    }
+    const result = await casUpdate(code, writerIdRef.current, transform);
+    if (result) setRoom((prev) => (!prev || (result.version || 0) >= (prev.version || 0) ? result : prev));
+  }
+
+  /* ---------------- lobby / connection ---------------- */
+  async function handleCreate() {
+    setBusy(true); setError("");
+    // a code may already be taken on the matchmaking server; try a few
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const newCode = generateCode();
+      const state = newRoomState(newCode, name.trim() || "Player 1");
+      try {
+        const live = await hostRoom(newCode, state);
+        setCode(newCode); setMySlot("p1"); setRoom(live); setScreen("game");
+        setBusy(false);
+        return;
+      } catch (e) {
+        if (e && e.type === "unavailable-id") continue;
+        setError("Couldn't open a room. Check your connection and try again.");
+        setBusy(false);
+        return;
+      }
+    }
+    setError("Couldn't open a room. Please try again.");
+    setBusy(false);
+  }
+
+  async function handleJoin() {
+    setBusy(true); setError("");
+    const c = joinCode.trim().toUpperCase();
+    if (!c) { setError("Enter a room code."); setBusy(false); return; }
+    let r;
+    try {
+      r = await joinRoom(c);
+    } catch (e) {
+      setError("Couldn't reach that room. Check the code, and make sure your friend still has the game open.");
+      setBusy(false);
+      return;
+    }
+    const updated = {
+      ...r,
+      players: r.players.map((p, i) => (i === 1 ? { ...p, connected: true, name: name.trim() || "Player 2" } : p)),
+      log: [...r.log, `${name.trim() || "Player 2"} joined the room.`],
+    };
+    setMySlot("p2");
+    const saved = await writeRoom(updated, writerIdRef.current);
+    setCode(c); setRoom(saved); setScreen("game");
+    setBusy(false);
+  }
+
+  function copyCode() {
+    try {
+      navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (e) {}
+  }
+
+  function leaveRoom() {
+    clearInterval(pollRef.current);
+    clearTimeout(flashTimerRef.current);
+    if (mode !== "bot") netTeardown();
+    setScreen("home"); setRoom(null); setCode(""); setMySlot(null); setMode("online");
+    clearTimeout(tapTimerRef.current);
+    setShuffling(false); shuffledRoundRef.current = null; setGodMode(false);
+    setPeekedIdx([]); setStackMode(false); setEffectFlow(null); setModal(null); setFlashKeys(new Set()); setFlights([]); setTapSelected(null); setGodMode(false);
+    botStackSeenRef.current = null;
+  }
+
+  function handlePlayBot() {
+    const base = newRoomState("BOT", name.trim() || "You");
+    base.players[1] = { ...base.players[1], name: "Bot", connected: true };
+    const dealt = dealRound({ ...base, round: 1 });
+    setMode("bot"); setCode("BOT"); setMySlot("p1"); setRoom(dealt); setScreen("game");
+  }
+
+  /* ---------------- game actions ---------------- */
+  async function handleStartRound() {
+    await updateRoom((s) => (s.phase === "lobby" ? dealRound({ ...s, round: 1 }) : s));
+  }
+
+  async function handlePeekReady() {
+    await updateRoom((s) => {
+      const players = s.players.map((p) => (p.slot === mySlot ? { ...p, ready: true } : p));
+      const bothReady = players.every((p) => p.ready);
+      return {
+        ...s, players, phase: bothReady ? "playing" : "peek",
+        log: [...s.log, `${nameOf(s, mySlot)} is ready.`, ...(bothReady ? ["Both players ready — game begins!"] : [])],
+      };
+    });
+    setPeekedIdx([]);
+  }
+
+  async function handleDrawFrom(pile) {
+    await updateRoom((s) => {
+      if (s.turn !== mySlot || s.drawnCard || s.pendingEffect || s.pendingGive) return s;
+      let { drawPile, discardPile } = ensureDraw(s);
+      let drawn;
+      if (pile === "discard") {
+        if (discardPile.length === 0) return s;
+        drawn = discardPile[discardPile.length - 1];
+        discardPile = discardPile.slice(0, -1);
+      } else {
+        if (drawPile.length === 0) return s;
+        drawn = drawPile[drawPile.length - 1];
+        drawPile = drawPile.slice(0, -1);
+      }
+      return {
+        ...s, drawPile, discardPile, drawnCard: drawn, drawnBy: mySlot, kabulWindow: null,
+        lastMove: {
+          keys: [],
+          flights: [{
+            from: pile === "discard" ? "discard" : "deck",
+            to: "drawn",
+            card: drawn,
+            // a discard-pile draw is public; a deck draw only the drawer sees
+            faceUp: pile === "discard",
+            faceUpFor: mySlot,
+          }],
+          ts: Date.now(),
+        },
+        log: [...s.log, `${nameOf(s, mySlot)} drew from the ${pile === "discard" ? "discard pile" : "deck"}.`],
+      };
+    });
+  }
+
+  async function handleDiscardDrawn() {
+    await updateRoom((s) => {
+      if (s.drawnBy !== mySlot || !s.drawnCard) return s;
+      const card = s.drawnCard;
+      const discardPile = [...s.discardPile, card];
+      const nextTurn = mySlot === "p1" ? "p2" : "p1";
+      let pendingEffect = null;
+      let finalTurnTaken = s.finalTurnTaken;
+      const isFinalTurn = s.phase === "kabul-final";
+      if (isFinalTurn) finalTurnTaken = true;
+      // once Kabul is called the caller's hand is locked — the final turn gets
+      // no powers at all, so nothing can reach into their cards
+      if (card.effect && !isFinalTurn) pendingEffect = { effect: card.effect, by: mySlot };
+      let next = {
+        ...s, discardPile, drawnCard: null, drawnBy: null, turn: nextTurn, pendingEffect, finalTurnTaken, firstDiscardDone: true,
+        kabulWindow: pendingEffect ? null : openKabulWindow(s, mySlot),
+        lastMove: { keys: [], flights: [{ from: "drawn", to: "discard", card, faceUp: true }], ts: Date.now() },
+        log: [...s.log, `${nameOf(s, mySlot)} discarded the drawn ${card.rank}${SUIT_SYMBOL[card.suit]}${pendingEffect ? " — power available!" : isFinalTurn && card.effect ? " — no powers on the final turn." : "."}`],
+      };
+      if (!pendingEffect && isFinalTurn) next = finalizeRound(next);
+      return next;
+    });
+  }
+
+  async function handleSwapDrawn(cardId) {
+    await updateRoom((s) => {
+      if (s.drawnBy !== mySlot || !s.drawnCard) return s;
+      const players = s.players.map((p) => ({ ...p, grid: [...p.grid] }));
+      const mine = players.find((p) => p.slot === mySlot);
+      const idx = mine.grid.findIndex((c) => c && c.id === cardId);
+      if (idx === -1) return s;
+      const old = mine.grid[idx];
+      mine.grid[idx] = s.drawnCard;
+      const discardPile = [...s.discardPile, old];
+      const nextTurn = mySlot === "p1" ? "p2" : "p1";
+      let finalTurnTaken = s.finalTurnTaken;
+      if (s.phase === "kabul-final") finalTurnTaken = true;
+      let next = {
+        ...s, players, discardPile, drawnCard: null, drawnBy: null, turn: nextTurn, finalTurnTaken, firstDiscardDone: true,
+        kabulWindow: openKabulWindow(s, mySlot),
+        lastMove: {
+          keys: [`${mySlot}-${idx}`],
+          flights: [
+            { from: "drawn", to: `${mySlot}-${idx}`, card: s.drawnCard, faceUp: false },
+            { from: `${mySlot}-${idx}`, to: "discard", card: old, faceUp: true },
+          ],
+          ts: Date.now(),
+        },
+        log: [...s.log, `${nameOf(s, mySlot)} swapped in a card and discarded ${old.rank}${SUIT_SYMBOL[old.suit]}.`],
+      };
+      if (s.phase === "kabul-final") next = finalizeRound(next);
+      return next;
+    });
+  }
+
+  async function handleStackTap(targetSlot, cardId) {
+    await updateRoom((s) => {
+      // stacking is live at any time until Kabul locks the round; it does not
+      // care whose turn it is, or whether a draw or power-up is in progress
+      if (s.phase !== "playing" || s.pendingGive) return s;
+      const top = s.discardPile[s.discardPile.length - 1];
+      const players = s.players.map((p) => ({ ...p, grid: [...p.grid] }));
+      const targetP = players.find((p) => p.slot === targetSlot);
+      const idx = targetP.grid.findIndex((c) => c && c.id === cardId);
+      if (idx === -1) return s;
+      const card = targetP.grid[idx];
+      // no stacking off the round's opening flip — the first play must be a
+      // real turn, so an early stack attempt is an automatic penalty
+      const tooEarly = !s.firstDiscardDone;
+      const match = !tooEarly && card.rank === top.rank;
+      if (match) {
+        targetP.grid[idx] = null;
+        const discardPile = [...s.discardPile, card];
+        const pendingGive = targetSlot !== mySlot ? { from: mySlot, to: targetSlot } : null;
+        return {
+          ...s, players, discardPile, pendingGive,
+          lastMove: { keys: [], flights: [{ from: `${targetSlot}-${idx}`, to: "discard", card, faceUp: true }], ts: Date.now() },
+          log: [...s.log, `${nameOf(s, mySlot)} stacked a ${card.rank}${SUIT_SYMBOL[card.suit]}${targetSlot !== mySlot ? ` from ${nameOf(s, targetSlot)}'s cards` : ""}!`],
+        };
+      } else {
+        const { drawPile, discardPile } = ensureDraw(s);
+        const dp = [...drawPile];
+        const stackerP = players.find((p) => p.slot === mySlot);
+        const penalty = dp.pop();
+        let landIdx = -1;
+        if (penalty) {
+          const empty = stackerP.grid.findIndex((c) => c === null);
+          if (empty !== -1) { stackerP.grid[empty] = penalty; landIdx = empty; }
+          else { stackerP.grid.push(penalty); landIdx = stackerP.grid.length - 1; }
+        }
+        return {
+          ...s, players, drawPile: dp, discardPile,
+          lastMove: {
+            keys: landIdx !== -1 ? [`${mySlot}-${landIdx}`] : [],
+            flights: landIdx !== -1 ? [{ from: "deck", to: `${mySlot}-${landIdx}`, card: penalty, faceUp: false }] : [],
+            ts: Date.now(),
+          },
+          log: [...s.log, tooEarly
+            ? `${nameOf(s, mySlot)} tried to stack before the round's first play — penalty card.`
+            : `${nameOf(s, mySlot)} guessed wrong and picked up a penalty card.`],
+        };
+      }
+    });
+  }
+
+  async function handleGiveCard(cardId) {
+    await updateRoom((s) => {
+      if (!s.pendingGive || s.pendingGive.from !== mySlot) return s;
+      const players = s.players.map((p) => ({ ...p, grid: [...p.grid] }));
+      const fromP = players.find((p) => p.slot === s.pendingGive.from);
+      const toP = players.find((p) => p.slot === s.pendingGive.to);
+      const idx = fromP.grid.findIndex((c) => c && c.id === cardId);
+      if (idx === -1) return s;
+      const card = fromP.grid[idx];
+      fromP.grid[idx] = null;
+      const empty = toP.grid.findIndex((c) => c === null);
+      let landIdx;
+      if (empty !== -1) { toP.grid[empty] = card; landIdx = empty; } else { toP.grid.push(card); landIdx = toP.grid.length - 1; }
+      return {
+        ...s, players, pendingGive: null,
+        lastMove: {
+          keys: [`${toP.slot}-${landIdx}`],
+          flights: [{ from: `${fromP.slot}-${idx}`, to: `${toP.slot}-${landIdx}`, card, faceUp: false }],
+          ts: Date.now(),
+        },
+        log: [...s.log, `${nameOf(s, fromP.slot)} handed a card to ${nameOf(s, toP.slot)}.`],
+      };
+    });
+  }
+
+  async function resolveViewEffect() {
+    await updateRoom((s) => {
+      if (!s.pendingEffect || s.pendingEffect.by !== mySlot) return s;
+      let next = { ...s, pendingEffect: null, kabulWindow: openKabulWindow(s, mySlot), log: [...s.log, `${nameOf(s, mySlot)} used the card's power.`] };
+      if (next.finalTurnTaken) next = finalizeRound(next);
+      return next;
+    });
+  }
+
+  async function resolveSwapEffect(ownCardId, oppCardId) {
+    await updateRoom((s) => {
+      if (!s.pendingEffect || s.pendingEffect.by !== mySlot) return s;
+      const players = s.players.map((p) => ({ ...p, grid: [...p.grid] }));
+      const mine = players.find((p) => p.slot === mySlot);
+      const opp = players.find((p) => p.slot !== mySlot);
+      const mi = mine.grid.findIndex((c) => c && c.id === ownCardId);
+      const oi = opp.grid.findIndex((c) => c && c.id === oppCardId);
+      if (mi === -1 || oi === -1) {
+        let next = { ...s, pendingEffect: null, kabulWindow: openKabulWindow(s, mySlot), log: [...s.log, `${nameOf(s, mySlot)}'s power fizzled — one of those cards is gone now.`] };
+        if (next.finalTurnTaken) next = finalizeRound(next);
+        return next;
+      }
+      const tmp = mine.grid[mi];
+      const oppCard = opp.grid[oi];
+      mine.grid[mi] = oppCard;
+      opp.grid[oi] = tmp;
+      let next = {
+        ...s, players, pendingEffect: null, kabulWindow: openKabulWindow(s, mySlot),
+        lastMove: {
+          keys: [`${mySlot}-${mi}`, `${opp.slot}-${oi}`],
+          flights: [
+            { from: `${mySlot}-${mi}`, to: `${opp.slot}-${oi}`, card: tmp, faceUp: false },
+            { from: `${opp.slot}-${oi}`, to: `${mySlot}-${mi}`, card: oppCard, faceUp: false },
+          ],
+          ts: Date.now(),
+        },
+        log: [...s.log, `${nameOf(s, mySlot)} swapped a card with ${nameOf(s, opp.slot)}.`],
+      };
+      if (next.finalTurnTaken) next = finalizeRound(next);
+      return next;
+    });
+  }
+
+  async function handleCallKabul() {
+    await updateRoom((s) => {
+      if (s.kabulCalledBy || s.drawnCard || s.pendingEffect) return s;
+      const inWindow = s.kabulWindow && s.kabulWindow.slot === mySlot && Date.now() < s.kabulWindow.expires;
+      if (s.turn !== mySlot && !inWindow) return s;
+      const other = mySlot === "p1" ? "p2" : "p1";
+      return {
+        ...s, kabulCalledBy: mySlot, phase: "kabul-final", turn: other, kabulWindow: null,
+        log: [...s.log, `${nameOf(s, mySlot)} called KABUL! ${nameOf(s, other)} gets one final turn.`],
+      };
+    });
+  }
+
+  async function handleNextRound() {
+    await updateRoom((s) => (s.round >= 5 ? { ...s, phase: "game-end" } : dealRound({ ...s, round: s.round + 1 })));
+  }
+
+  async function handleNewMatch() {
+    await updateRoom((s) => dealRound({ ...s, round: 1, players: s.players.map((p) => ({ ...p, score: 0, roundScores: [] })) }));
+  }
+
+  /* ---------------- bot AI ---------------- */
+  async function botReady() {
+    await updateRoom((s) => {
+      const players = s.players.map((p) => (p.slot === BOT_SLOT ? { ...p, ready: true } : p));
+      const bothReady = players.every((p) => p.ready);
+      return {
+        ...s, players, phase: bothReady ? "playing" : "peek",
+        log: [...s.log, bothReady ? "Both players ready — game begins!" : `${nameOf(s, BOT_SLOT)} is ready.`],
+      };
+    });
+  }
+
+  async function botCallKabul() {
+    await updateRoom((s) => {
+      if (s.turn !== BOT_SLOT || s.drawnCard || s.pendingEffect || s.kabulCalledBy) return s;
+      return {
+        ...s, kabulCalledBy: BOT_SLOT, phase: "kabul-final", turn: "p1", kabulWindow: null,
+        log: [...s.log, `${nameOf(s, BOT_SLOT)} called KABUL! You get one final turn.`],
+      };
+    });
+  }
+
+  async function botDraw() {
+    await updateRoom((s) => {
+      if (s.turn !== BOT_SLOT || s.drawnCard || s.pendingEffect || s.pendingGive) return s;
+      let { drawPile, discardPile } = ensureDraw(s);
+      const top = discardPile[discardPile.length - 1];
+      let fromDiscard = !!top && top.value <= 3;
+      let drawn;
+      if (fromDiscard) {
+        drawn = discardPile[discardPile.length - 1];
+        discardPile = discardPile.slice(0, -1);
+      } else if (drawPile.length === 0) {
+        fromDiscard = true;
+        drawn = discardPile[discardPile.length - 1];
+        discardPile = discardPile.slice(0, -1);
+      } else {
+        drawn = drawPile[drawPile.length - 1];
+        drawPile = drawPile.slice(0, -1);
+      }
+      return {
+        ...s, drawPile, discardPile, drawnCard: drawn, drawnBy: BOT_SLOT,
+        lastMove: {
+          keys: [],
+          flights: [{
+            from: fromDiscard ? "discard" : "deck",
+            to: "drawn",
+            card: drawn,
+            faceUp: fromDiscard,
+            faceUpFor: BOT_SLOT,
+          }],
+          ts: Date.now(),
+        },
+        log: [...s.log, `${nameOf(s, BOT_SLOT)} drew from the ${fromDiscard ? "discard pile" : "deck"}.`],
+      };
+    });
+  }
+
+  async function botDecideDrawn() {
+    await updateRoom((s) => {
+      if (s.drawnBy !== BOT_SLOT || !s.drawnCard) return s;
+      const drawn = s.drawnCard;
+      const known = s.botKnown || {};
+      const players = s.players.map((p) => ({ ...p, grid: [...p.grid] }));
+      const bot = players.find((p) => p.slot === BOT_SLOT);
+      let worstIdx = -1, worstVal = -Infinity;
+      bot.grid.forEach((c, i) => { if (c && known[c.id] && c.value > worstVal) { worstVal = c.value; worstIdx = i; } });
+      let swapIdx = -1;
+      if (worstIdx !== -1 && drawn.value < worstVal) swapIdx = worstIdx;
+      else if (worstIdx === -1) {
+        const unknownIdxs = bot.grid.map((c, i) => (c && !known[c.id] ? i : null)).filter((i) => i !== null);
+        if (drawn.value <= 4 && unknownIdxs.length > 0) swapIdx = unknownIdxs[Math.floor(Math.random() * unknownIdxs.length)];
+      }
+      const nextTurn = "p1";
+      let finalTurnTaken = s.finalTurnTaken;
+      if (s.phase === "kabul-final") finalTurnTaken = true;
+      const botTurns = (s.botTurns || 0) + 1;
+      if (swapIdx !== -1) {
+        const old = bot.grid[swapIdx];
+        bot.grid[swapIdx] = drawn;
+        const discardPile = [...s.discardPile, old];
+        let next = {
+          ...s, players, discardPile, drawnCard: null, drawnBy: null, turn: nextTurn, finalTurnTaken, botTurns, kabulWindow: null, firstDiscardDone: true,
+          lastMove: {
+            keys: [`${BOT_SLOT}-${swapIdx}`],
+            flights: [
+              { from: "drawn", to: `${BOT_SLOT}-${swapIdx}`, card: drawn, faceUp: false },
+              { from: `${BOT_SLOT}-${swapIdx}`, to: "discard", card: old, faceUp: true },
+            ],
+            ts: Date.now(),
+          },
+          log: [...s.log, `${nameOf(s, BOT_SLOT)} swapped in a card.`],
+        };
+        if (s.phase === "kabul-final") next = finalizeRound(next);
+        return next;
+      }
+      const discardPile = [...s.discardPile, drawn];
+      // no powers on the final turn — the caller's hand is locked
+      const pendingEffect = drawn.effect && s.phase !== "kabul-final" ? { effect: drawn.effect, by: BOT_SLOT } : null;
+      let next = {
+        ...s, discardPile, drawnCard: null, drawnBy: null, turn: nextTurn, pendingEffect, finalTurnTaken, botTurns, kabulWindow: null, firstDiscardDone: true,
+        lastMove: { keys: [], flights: [{ from: "drawn", to: "discard", card: drawn, faceUp: true }], ts: Date.now() },
+        log: [...s.log, `${nameOf(s, BOT_SLOT)} discarded the drawn card${pendingEffect ? " — using its power!" : "."}`],
+      };
+      if (!pendingEffect && s.phase === "kabul-final") next = finalizeRound(next);
+      return next;
+    });
+  }
+
+  async function botResolveEffect() {
+    await updateRoom((s) => {
+      if (!s.pendingEffect || s.pendingEffect.by !== BOT_SLOT) return s;
+      const effect = s.pendingEffect.effect;
+      const players = s.players.map((p) => ({ ...p, grid: [...p.grid] }));
+      const bot = players.find((p) => p.slot === BOT_SLOT);
+      const human = players.find((p) => p.slot !== BOT_SLOT);
+      const known = { ...(s.botKnown || {}) };
+
+      if (effect === "view-own" || effect === "view-opp") {
+        const target = effect === "view-own" ? bot : human;
+        const idxs = target.grid.map((c, i) => (c && !known[c.id] ? i : null)).filter((i) => i !== null);
+        if (idxs.length) known[target.grid[idxs[Math.floor(Math.random() * idxs.length)]].id] = true;
+        let next = {
+          ...s, botKnown: known, pendingEffect: null,
+          log: [...s.log, `${nameOf(s, BOT_SLOT)} peeked at one of ${effect === "view-own" ? "its own" : "your"} cards.`],
+        };
+        if (next.finalTurnTaken) next = finalizeRound(next);
+        return next;
+      }
+
+      if (effect === "view1-swap" || effect === "view2-swap") {
+        const viewCount = effect === "view1-swap" ? 1 : 2;
+        const idxs = human.grid.map((c, i) => (c ? i : null)).filter((i) => i !== null).sort(() => Math.random() - 0.5).slice(0, viewCount);
+        idxs.forEach((i) => { known[human.grid[i].id] = true; });
+      }
+
+      // shared swap decision for blind-swap, view1-swap, view2-swap
+      let worstOwnIdx = -1, worstOwnVal = -Infinity;
+      bot.grid.forEach((c, i) => { if (c && known[c.id] && c.value > worstOwnVal) { worstOwnVal = c.value; worstOwnIdx = i; } });
+      if (worstOwnIdx === -1) {
+        const any = bot.grid.map((c, i) => (c ? i : null)).filter((i) => i !== null);
+        if (any.length) worstOwnIdx = any[Math.floor(Math.random() * any.length)];
+      }
+      let bestOppIdx = -1, bestOppVal = Infinity;
+      human.grid.forEach((c, i) => { if (c && known[c.id] && c.value < bestOppVal) { bestOppVal = c.value; bestOppIdx = i; } });
+      if (bestOppIdx === -1) {
+        const any = human.grid.map((c, i) => (c ? i : null)).filter((i) => i !== null);
+        if (any.length) bestOppIdx = any[Math.floor(Math.random() * any.length)];
+      }
+      let next = { ...s, botKnown: known, pendingEffect: null };
+      if (worstOwnIdx !== -1 && bestOppIdx !== -1) {
+        const tmp = bot.grid[worstOwnIdx];
+        const humanCard = human.grid[bestOppIdx];
+        bot.grid[worstOwnIdx] = humanCard;
+        human.grid[bestOppIdx] = tmp;
+        next.players = players;
+        next.lastMove = {
+          keys: [`${BOT_SLOT}-${worstOwnIdx}`, `${human.slot}-${bestOppIdx}`],
+          flights: [
+            { from: `${BOT_SLOT}-${worstOwnIdx}`, to: `${human.slot}-${bestOppIdx}`, card: tmp, faceUp: false },
+            { from: `${human.slot}-${bestOppIdx}`, to: `${BOT_SLOT}-${worstOwnIdx}`, card: humanCard, faceUp: false },
+          ],
+          ts: Date.now(),
+        };
+        next.log = [...s.log, `${nameOf(s, BOT_SLOT)} swapped a card with you.`];
+      } else {
+        next.log = [...s.log, `${nameOf(s, BOT_SLOT)} had no card to swap.`];
+      }
+      if (next.finalTurnTaken) next = finalizeRound(next);
+      return next;
+    });
+  }
+
+  async function botGiveCard() {
+    await updateRoom((s) => {
+      if (!s.pendingGive || s.pendingGive.from !== BOT_SLOT) return s;
+      const players = s.players.map((p) => ({ ...p, grid: [...p.grid] }));
+      const bot = players.find((p) => p.slot === BOT_SLOT);
+      const human = players.find((p) => p.slot === s.pendingGive.to);
+      const known = s.botKnown || {};
+      let idx = -1, val = -Infinity;
+      bot.grid.forEach((c, i) => { if (c && known[c.id] && c.value > val) { val = c.value; idx = i; } });
+      if (idx === -1) {
+        const any = bot.grid.map((c, i) => (c ? i : null)).filter((i) => i !== null);
+        if (any.length) idx = any[Math.floor(Math.random() * any.length)];
+      }
+      if (idx === -1) return { ...s, pendingGive: null };
+      const card = bot.grid[idx];
+      bot.grid[idx] = null;
+      const empty = human.grid.findIndex((c) => c === null);
+      let landIdx;
+      if (empty !== -1) { human.grid[empty] = card; landIdx = empty; } else { human.grid.push(card); landIdx = human.grid.length - 1; }
+      return {
+        ...s, players, pendingGive: null,
+        lastMove: {
+          keys: [`${human.slot}-${landIdx}`],
+          flights: [{ from: `${BOT_SLOT}-${idx}`, to: `${human.slot}-${landIdx}`, card, faceUp: false }],
+          ts: Date.now(),
+        },
+        log: [...s.log, `${nameOf(s, BOT_SLOT)} handed you a card.`],
+      };
+    });
+  }
+
+  async function botMaybeStack() {
+    await updateRoom((s) => {
+      if (s.phase !== "playing" || s.pendingGive || !s.firstDiscardDone) return s;
+      const top = s.discardPile[s.discardPile.length - 1];
+      if (!top) return s;
+      const known = s.botKnown || {};
+      const players = s.players.map((p) => ({ ...p, grid: [...p.grid] }));
+      const bot = players.find((p) => p.slot === BOT_SLOT);
+      const human = players.find((p) => p.slot !== BOT_SLOT);
+      const ownIdx = bot.grid.findIndex((c) => c && known[c.id] && c.rank === top.rank);
+      const oppIdx = human.grid.findIndex((c) => c && known[c.id] && c.rank === top.rank);
+      if (ownIdx === -1 && oppIdx === -1) return s;
+      if (ownIdx !== -1) {
+        const card = bot.grid[ownIdx];
+        bot.grid[ownIdx] = null;
+        return {
+          ...s, players, discardPile: [...s.discardPile, card],
+          lastMove: { keys: [], flights: [{ from: `${BOT_SLOT}-${ownIdx}`, to: "discard", card, faceUp: true }], ts: Date.now() },
+          log: [...s.log, `${nameOf(s, BOT_SLOT)} stacked a ${card.rank}${SUIT_SYMBOL[card.suit]} from its own cards.`],
+        };
+      }
+      const card = human.grid[oppIdx];
+      human.grid[oppIdx] = null;
+      return {
+        ...s, players, discardPile: [...s.discardPile, card], pendingGive: { from: BOT_SLOT, to: "p1" },
+        lastMove: { keys: [], flights: [{ from: `${human.slot}-${oppIdx}`, to: "discard", card, faceUp: true }], ts: Date.now() },
+        log: [...s.log, `${nameOf(s, BOT_SLOT)} stacked a ${card.rank}${SUIT_SYMBOL[card.suit]} from your cards!`],
+      };
+    });
+  }
+
+  useEffect(() => {
+    if (mode !== "bot" || !room) return;
+    const bot = room.players.find((p) => p.slot === BOT_SLOT);
+    if (room.phase === "peek" && bot && !bot.ready) {
+      const t = setTimeout(botReady, 500);
+      return () => clearTimeout(t);
+    }
+  }, [mode, botSig]);
+
+  useEffect(() => {
+    if (mode !== "bot" || !room) return;
+    if (room.turn !== BOT_SLOT || room.drawnCard || room.pendingEffect || room.pendingGive) return;
+    if (room.phase !== "playing" && room.phase !== "kabul-final") return;
+    // hold off until the player's post-move Kabul window has expired
+    const windowLeft = room.kabulWindow ? room.kabulWindow.expires - Date.now() : 0;
+    const delay = Math.max(1100 + Math.random() * 700, windowLeft + 250);
+    const t = setTimeout(() => {
+      const bot = room.players.find((p) => p.slot === BOT_SLOT);
+      const known = room.botKnown || {};
+      const estimate = bot.grid.reduce((sum, c) => sum + (c ? (known[c.id] ? c.value : 5) : 0), 0);
+      if (room.phase === "playing" && !room.kabulCalledBy && (room.botTurns || 0) >= 2 && estimate <= 5) botCallKabul();
+      else botDraw();
+    }, delay);
+    return () => clearTimeout(t);
+  }, [mode, botSig]);
+
+  useEffect(() => {
+    if (mode !== "bot" || !room) return;
+    if (room.drawnBy !== BOT_SLOT || !room.drawnCard) return;
+    const t = setTimeout(botDecideDrawn, 900 + Math.random() * 600);
+    return () => clearTimeout(t);
+  }, [mode, botSig]);
+
+  useEffect(() => {
+    if (mode !== "bot" || !room) return;
+    if (!room.pendingEffect || room.pendingEffect.by !== BOT_SLOT) return;
+    const t = setTimeout(botResolveEffect, 900 + Math.random() * 700);
+    return () => clearTimeout(t);
+  }, [mode, botSig]);
+
+  useEffect(() => {
+    if (mode !== "bot" || !room) return;
+    if (!room.pendingGive || room.pendingGive.from !== BOT_SLOT) return;
+    const t = setTimeout(botGiveCard, 800 + Math.random() * 500);
+    return () => clearTimeout(t);
+  }, [mode, botSig]);
+
+  useEffect(() => {
+    if (mode !== "bot" || !room) return;
+    if (room.phase !== "playing" || room.drawnCard || room.pendingGive || !room.discardPile.length) return;
+    const topId = room.discardPile[room.discardPile.length - 1].id;
+    if (botStackSeenRef.current === topId) return;
+    const t = setTimeout(() => { botStackSeenRef.current = topId; botMaybeStack(); }, 700 + Math.random() * 600);
+    return () => clearTimeout(t);
+  }, [mode, botSig]);
+
+  /* ---------------- board tap dispatch ---------------- */
+  function handleEffectFlowTap(targetSlot, card) {
+    setEffectFlow((flow) => {
+      if (!flow) return flow;
+      const isOwn = targetSlot === mySlot;
+      switch (flow.type) {
+        case "view-own":
+          if (flow.stage === "pick" && isOwn) {
+            setModal({ cards: [card] });
+            return { ...flow, stage: "done" };
+          }
+          return flow;
+        case "view-opp":
+          if (flow.stage === "pick" && !isOwn) {
+            setModal({ cards: [card] });
+            return { ...flow, stage: "done" };
+          }
+          return flow;
+        case "blind-swap":
+          if (flow.stage === "pick-own" && isOwn) return { ...flow, stage: "pick-opp", ownId: card.id };
+          if (flow.stage === "pick-opp" && !isOwn) { resolveSwapEffect(flow.ownId, card.id); return null; }
+          return flow;
+        case "view1-swap":
+          if (flow.stage === "pick-view" && !isOwn) {
+            setModal({ cards: [card], continueFlow: true });
+            return { ...flow, stage: "pick-own" };
+          }
+          if (flow.stage === "pick-own" && isOwn) return { ...flow, stage: "pick-opp", ownId: card.id };
+          if (flow.stage === "pick-opp" && !isOwn) { resolveSwapEffect(flow.ownId, card.id); return null; }
+          return flow;
+        case "view2-swap":
+          if (flow.stage === "pick-view" && !isOwn) {
+            const viewed = [...(flow.viewed || []), card];
+            if (viewed.length < 2) return { ...flow, viewed };
+            setModal({ cards: viewed, continueFlow: true });
+            return { ...flow, stage: "pick-own", viewed };
+          }
+          if (flow.stage === "pick-own" && isOwn) return { ...flow, stage: "pick-opp", ownId: card.id };
+          if (flow.stage === "pick-opp" && !isOwn) { resolveSwapEffect(flow.ownId, card.id); return null; }
+          return flow;
+        default:
+          return flow;
+      }
+    });
+  }
+
+  // briefly mark a tapped card so the player can see what they just picked
+  function markTapped(key) {
+    setTapSelected(key);
+    clearTimeout(tapTimerRef.current);
+    tapTimerRef.current = setTimeout(() => setTapSelected(null), 650);
+  }
+
+  // God mode: pull a card straight off either grid. Used to undo mistakes,
+  // most often a penalty card picked up because stack mode was left on.
+  async function handleGodRemove(targetSlot, cardId) {
+    await updateRoom((s) => {
+      const players = s.players.map((p) => ({ ...p, grid: [...p.grid] }));
+      const target = players.find((p) => p.slot === targetSlot);
+      const i = target.grid.findIndex((c) => c && c.id === cardId);
+      if (i === -1) return s;
+      const card = target.grid[i];
+      target.grid[i] = null;
+      return {
+        ...s, players,
+        log: [...s.log, `God mode: removed ${card.rank}${SUIT_SYMBOL[card.suit]} from ${nameOf(s, targetSlot)}'s cards.`],
+      };
+    });
+  }
+
+  function handleGridTap(targetSlot, card, idx) {
+    if (!card) return;
+    const key = `${targetSlot}-${idx}`;
+    if (godMode) {
+      markTapped(key);
+      handleGodRemove(targetSlot, card.id);
+      return;
+    }
+    if (stackMode) {
+      if (!room.pendingGive && room.phase === "playing") {
+        markTapped(key);
+        handleStackTap(targetSlot, card.id);
+      }
+      return;
+    }
+    if (room.drawnCard && room.drawnBy === mySlot && targetSlot === mySlot && !effectFlow) {
+      markTapped(key);
+      handleSwapDrawn(card.id);
+      return;
+    }
+    if (effectFlow) { markTapped(key); handleEffectFlowTap(targetSlot, card); return; }
+  }
+
+  function closeModal() {
+    const wasEffectDone = modal && !modal.continueFlow;
+    setModal(null);
+    if (wasEffectDone) resolveViewEffect();
+  }
+
+  /* ================================================================ */
+  /* Render: home screen                                                */
+  /* ================================================================ */
+  if (screen === "home") {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-4" style={roomStyle}>
+      <AnimStyles />
+        <div className="w-full max-w-sm">
+          <div className="text-center mb-8">
+            <h1 className="font-serif text-5xl font-bold" style={{ color: C.goldSoft, letterSpacing: "0.04em", textShadow: "0 2px 18px rgba(226,178,120,0.25)" }}>Kabul</h1>
+            <p className="mt-2 text-sm" style={{ color: C.muted }}>A two-player memory &amp; bluffing card game</p>
+          </div>
+
+          <div className="rounded-2xl p-5 mb-4" style={{ background: `${WEAVE}, linear-gradient(180deg, rgba(42,27,17,0.46), rgba(42,27,17,0.34))`, border: "1px solid rgba(255,225,190,0.14)", boxShadow: "0 8px 24px rgba(40,24,12,0.32)" }}>
+            <label className="block text-xs mb-1.5" style={{ color: C.muted }}>Your name</label>
+            <input
+              value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Sam" maxLength={16}
+              className="w-full rounded-lg px-3 py-2.5 mb-4 outline-none"
+              style={{ background: "#efe5d5", color: C.ink, border: "1px solid rgba(192,138,78,0.25)" }}
+            />
+            <button onClick={handleCreate} disabled={busy} className="w-full py-3 rounded-xl font-semibold mb-3" style={{ background: `linear-gradient(180deg, #d09a5e, ${C.gold})`, color: "#2a1f18", boxShadow: "0 4px 14px rgba(192,138,78,0.25)" }}>
+              Create a room
+            </button>
+
+            <div className="flex items-center gap-2 my-3">
+              <div className="h-px flex-1" style={{ background: "rgba(192,138,78,0.22)" }} />
+              <span className="text-xs" style={{ color: C.muted }}>or join a friend</span>
+              <div className="h-px flex-1" style={{ background: "rgba(192,138,78,0.22)" }} />
+            </div>
+
+            <input
+              value={joinCode} onChange={(e) => setJoinCode(e.target.value.toUpperCase())} placeholder="ROOM CODE" maxLength={4}
+              className="w-full rounded-lg px-3 py-2.5 mb-3 outline-none tracking-widest text-center font-serif text-lg"
+              style={{ background: "#efe5d5", color: C.ink, border: "1px solid rgba(192,138,78,0.25)" }}
+            />
+            <button onClick={handleJoin} disabled={busy} className="w-full py-3 rounded-lg font-semibold" style={{ background: "transparent", color: C.goldSoft, border: `1px solid ${C.gold}` }}>
+              Join room
+            </button>
+            {error && <p className="text-sm mt-3" style={{ color: "#d99a85" }}>{error}</p>}
+          </div>
+
+          <button onClick={handlePlayBot} className="w-full py-3 rounded-lg font-semibold mb-4" style={{ background: "transparent", color: C.muted, border: "1px solid rgba(255,225,190,0.3)" }}>
+            Practice against a bot
+          </button>
+
+          <button onClick={() => setShowRules(true)} className="w-full text-center text-xs underline" style={{ color: C.muted }}>
+            How to play
+          </button>
+        </div>
+        {showRules && <RulesModal onClose={() => setShowRules(false)} />}
+      </div>
+    );
+  }
+
+  /* ================================================================ */
+  /* Render: connecting                                                 */
+  /* ================================================================ */
+  if (!room) {
+    return (
+      <div className="min-h-screen flex items-center justify-center" style={{ background: C.feltDeep, color: C.muted }}>
+        Connecting…
+      </div>
+    );
+  }
+
+  const me = room.players.find((p) => p.slot === mySlot);
+  const opp = room.players.find((p) => p.slot !== mySlot);
+
+  /* ================================================================ */
+  /* Render: lobby                                                      */
+  /* ================================================================ */
+  if (room.phase === "lobby") {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-4" style={roomStyle}>
+      <AnimStyles />
+        <div className="w-full max-w-sm text-center">
+          <h2 className="font-serif text-2xl font-bold mb-1" style={{ color: C.goldSoft }}>Room ready</h2>
+          <p className="text-sm mb-6" style={{ color: C.muted }}>Tell your friend to join with this code:</p>
+          <button onClick={copyCode} className="mx-auto mb-6 flex items-center gap-2 px-6 py-3 rounded-xl font-serif text-3xl tracking-widest" style={{ background: C.card, color: C.ink }}>
+            {code} {copied ? <Check size={20} /> : <Copy size={18} />}
+          </button>
+          <div className="flex items-center justify-center gap-2 mb-2" style={{ color: opp.connected ? "#a8bf92" : C.muted }}>
+            <Users size={16} />
+            <span className="text-sm">{opp.connected ? `${opp.name} has joined!` : "Waiting for a second player…"}</span>
+          </div>
+          {mySlot === "p1" && (
+            <button onClick={handleStartRound} disabled={!opp.connected} className="w-full mt-6 py-3 rounded-lg font-semibold disabled:opacity-40" style={{ background: C.gold, color: C.feltDeep }}>
+              Deal the cards
+            </button>
+          )}
+          {mySlot === "p2" && !opp.connected && (
+            <p className="text-xs mt-4" style={{ color: C.muted }}>Waiting for the host to start the round.</p>
+          )}
+          <button onClick={leaveRoom} className="mt-8 text-xs underline flex items-center gap-1 mx-auto" style={{ color: C.muted }}>
+            <LogOut size={12} /> Leave
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  /* ================================================================ */
+  /* Render: peek phase                                                 */
+  /* ================================================================ */
+  if (room.phase === "peek") {
+    const myReady = me.ready;
+    return (
+      <div className="min-h-screen flex flex-col items-center p-4" style={roomStyle}>
+      <AnimStyles />
+        <h2 className="font-serif text-xl font-bold mt-6 mb-1" style={{ color: C.goldSoft }}>Round {room.round} — Peek</h2>
+        <p className="text-sm text-center mb-6 max-w-xs" style={{ color: C.muted }}>
+          Tap your <strong>bottom two</strong> cards to look at them, then memorize them — you won't get another free look.
+        </p>
+        <div className="flex gap-3 justify-center mb-3">
+          <PlayingCard card={me.grid[0]} faceUp={false} />
+          <PlayingCard card={me.grid[1]} faceUp={false} />
+        </div>
+        <div className="flex gap-3 justify-center">
+          <PlayingCard card={me.grid[2]} faceUp={peekedIdx.includes(2)} onClick={!myReady ? () => setPeekedIdx((p) => (p.includes(2) ? p : [...p, 2])) : undefined} highlight={!myReady && !peekedIdx.includes(2)} />
+          <PlayingCard card={me.grid[3]} faceUp={peekedIdx.includes(3)} onClick={!myReady ? () => setPeekedIdx((p) => (p.includes(3) ? p : [...p, 3])) : undefined} highlight={!myReady && !peekedIdx.includes(3)} />
+        </div>
+
+        {!myReady ? (
+          <button onClick={handlePeekReady} className="mt-10 px-8 py-3 rounded-xl font-semibold" style={{ background: `linear-gradient(180deg, #d09a5e, ${C.gold})`, color: "#2a1f18", boxShadow: "0 4px 14px rgba(192,138,78,0.25)" }}>
+            I've got it — start
+          </button>
+        ) : (
+          <p className="mt-10 text-sm" style={{ color: C.muted }}>Waiting for {opp.name || "your opponent"}…</p>
+        )}
+
+        {shuffling && <ShuffleOverlay onDone={() => setShuffling(false)} />}
+      </div>
+    );
+  }
+
+  /* ================================================================ */
+  /* Render: round-end / game-end                                       */
+  /* ================================================================ */
+  if (room.phase === "round-end" || room.phase === "game-end") {
+    const r = room.roundResult;
+    const finalWinner = room.phase === "game-end"
+      ? (room.players[0].score < room.players[1].score ? room.players[0] : room.players[1].score < room.players[0].score ? room.players[1] : null)
+      : null;
+    const roundCount = Math.max(...room.players.map((p) => p.roundScores.length), 0);
+    return (
+      <div className="min-h-screen flex flex-col items-center p-4" style={roomStyle}>
+      <AnimStyles />
+        <div className="w-full max-w-sm mt-6 pb-8">
+          {room.phase === "game-end" ? (
+            <div className="text-center mb-5">
+              <Trophy size={40} className="mx-auto mb-2" style={{ color: C.gold }} />
+              <h2 className="font-serif text-2xl font-bold" style={{ color: C.goldSoft }}>
+                {finalWinner ? `${finalWinner.name} wins the match!` : "It's a tie!"}
+              </h2>
+            </div>
+          ) : (
+            <h2 className="font-serif text-2xl font-bold text-center mb-1" style={{ color: C.goldSoft }}>Round {room.round} results</h2>
+          )}
+
+          {r && (
+            <div className="rounded-2xl p-4 mb-5" style={{ background: `${WEAVE}, linear-gradient(180deg, rgba(42,27,17,0.42), rgba(42,27,17,0.30))`, border: "1px solid rgba(255,225,190,0.12)", boxShadow: "0 6px 18px rgba(40,24,12,0.28)" }}>
+              <p className="text-sm text-center mb-3" style={{ color: C.card }}>
+                {nameOf(room, room.kabulCalledBy)} called Kabul and {r.callerHasLowest ? "had the lower hand." : "did NOT have the lower hand."}
+              </p>
+              <div className="text-xs space-y-1" style={{ color: C.muted, fontVariantNumeric: "tabular-nums" }}>
+                {room.players.map((p) => {
+                  const total = p.slot === "p1" ? r.t1 : r.t2;
+                  const b = r.bonus[p.slot];
+                  const rs = p.slot === "p1" ? r.roundScoreP1 : r.roundScoreP2;
+                  return (
+                    <div key={p.slot} className="flex justify-between">
+                      <span>{p.slot === mySlot ? "You" : p.name}</span>
+                      <span>
+                        {total} cards {b === 0 ? "" : b > 0 ? `+ ${b} penalty ` : `− ${Math.abs(b)} bonus `}= {rs}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* the reveal — both hands face up */}
+          <div className="rounded-2xl p-4 mb-5" style={{ background: `${WEAVE}, linear-gradient(180deg, rgba(42,27,17,0.42), rgba(42,27,17,0.30))`, border: "1px solid rgba(255,225,190,0.12)", boxShadow: "0 6px 18px rgba(40,24,12,0.28)" }}>
+            <p className="text-xs mb-3 text-center" style={{ color: C.muted }}>The hands</p>
+            {room.players.map((p, pi) => {
+              const handTotal = gridTotal(p.grid);
+              const bonus = r ? r.bonus[p.slot] : 0;
+              return (
+                <div key={p.slot} className="mb-3" style={{ paddingTop: pi === 1 ? "0.75rem" : 0, borderTop: pi === 1 ? "1px solid rgba(192,138,78,0.16)" : "none" }}>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-sm" style={{ color: C.card }}>
+                      {p.name}{p.slot === mySlot ? " (you)" : ""}{p.slot === room.kabulCalledBy ? " 👑" : ""}
+                    </span>
+                    <span className="text-xs" style={{ color: C.muted, fontVariantNumeric: "tabular-nums" }}>
+                      cards {handTotal}{bonus !== 0 ? ` ${bonus > 0 ? "+" : "−"}${Math.abs(bonus)} bonus` : ""}
+                    </span>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, max-content)", gap: "0.5rem", width: "fit-content", margin: "0 auto" }}>
+                    {p.grid.map((c, i) => (
+                      <div key={i} className="flex flex-col items-center">
+                        <PlayingCard card={c} faceUp={!!c} size="sm" />
+                        <span className="text-xs mt-1" style={{ color: C.muted, fontVariantNumeric: "tabular-nums" }}>{c ? c.value : "—"}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* round-by-round scoreboard */}
+          <div className="rounded-2xl p-4 mb-5" style={{ background: `${WEAVE}, linear-gradient(180deg, rgba(42,27,17,0.42), rgba(42,27,17,0.30))`, border: "1px solid rgba(255,225,190,0.12)", boxShadow: "0 6px 18px rgba(40,24,12,0.28)" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontVariantNumeric: "tabular-nums" }}>
+              <thead>
+                <tr>
+                  <th className="text-left text-xs font-normal pb-2" style={{ color: C.muted }}>Round</th>
+                  {room.players.map((p) => (
+                    <th key={p.slot} className="text-right text-xs font-normal pb-2" style={{ color: C.muted }}>
+                      {p.slot === mySlot ? "You" : p.name}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {Array.from({ length: 5 }).map((_, i) => {
+                  const played = i < roundCount;
+                  return (
+                    <tr key={i} style={{ borderTop: "1px solid rgba(192,138,78,0.12)" }}>
+                      <td className="text-xs py-1.5" style={{ color: played ? C.card : "rgba(240,220,196,0.42)" }}>{i + 1}</td>
+                      {room.players.map((p) => (
+                        <td key={p.slot} className="text-right text-sm py-1.5" style={{ color: played ? C.card : "rgba(240,220,196,0.32)" }}>
+                          {played ? p.roundScores[i] : "—"}
+                        </td>
+                      ))}
+                    </tr>
+                  );
+                })}
+                <tr style={{ borderTop: `2px solid ${C.gold}` }}>
+                  <td className="text-xs py-2 font-semibold" style={{ color: C.goldSoft }}>Total</td>
+                  {room.players.map((p) => {
+                    const leading = room.players.every((o) => p.score <= o.score);
+                    return (
+                      <td key={p.slot} className="text-right py-2 font-serif text-lg font-bold" style={{ color: leading ? C.goldSoft : C.card }}>
+                        {p.score}
+                      </td>
+                    );
+                  })}
+                </tr>
+              </tbody>
+            </table>
+            <p className="text-xs mt-2 text-center" style={{ color: C.muted }}>Lowest score wins</p>
+          </div>
+
+          {room.phase === "round-end" ? (
+            <button onClick={handleNextRound} className="w-full py-3 rounded-xl font-semibold" style={{ background: `linear-gradient(180deg, #d09a5e, ${C.gold})`, color: "#2a1f18", boxShadow: "0 4px 14px rgba(192,138,78,0.25)" }}>
+              {room.round >= 5 ? "See final result" : `Start round ${room.round + 1}`}
+            </button>
+          ) : (
+            <button onClick={handleNewMatch} className="w-full py-3 rounded-xl font-semibold" style={{ background: `linear-gradient(180deg, #d09a5e, ${C.gold})`, color: "#2a1f18", boxShadow: "0 4px 14px rgba(192,138,78,0.25)" }}>
+              Play again
+            </button>
+          )}
+          <button onClick={leaveRoom} className="mt-4 text-xs underline flex items-center gap-1 mx-auto" style={{ color: C.muted }}>
+            <LogOut size={12} /> Leave
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  /* ================================================================ */
+  /* Render: main board (playing / kabul-final)                         */
+  /* ================================================================ */
+  const kabulWindowOpen = !!(room.kabulWindow && nowTick < room.kabulWindow.expires);
+  const myKabulWindow = kabulWindowOpen && room.kabulWindow.slot === mySlot;
+  const kabulSecsLeft = kabulWindowOpen ? Math.ceil((room.kabulWindow.expires - nowTick) / 1000) : 0;
+
+  const myTurn = room.turn === mySlot;
+  const discardTop = room.discardPile[room.discardPile.length - 1];
+  const iAmDeciding = room.drawnCard && room.drawnBy === mySlot;
+  const oppDeciding = room.drawnCard && room.drawnBy !== mySlot;
+  const iCanAct = myTurn && !room.drawnCard && !room.pendingEffect && !room.pendingGive && !kabulWindowOpen;
+  const canStack = room.phase === "playing" && !room.pendingGive;
+  const canKabul = room.phase === "playing" && !room.kabulCalledBy && !room.drawnCard && !room.pendingEffect
+    && (myKabulWindow || (myTurn && !room.pendingGive && !kabulWindowOpen));
+  const myEffectActive = room.pendingEffect && room.pendingEffect.by === mySlot;
+
+  // which cards should read as "selected": the one just tapped, plus — during a
+  // swap power-up — the card you already locked in while you choose its partner
+  const selectedKeys = new Set();
+  if (tapSelected) selectedKeys.add(tapSelected);
+  if (effectFlow && effectFlow.ownId) {
+    const i = me.grid.findIndex((c) => c && c.id === effectFlow.ownId);
+    if (i !== -1) selectedKeys.add(`${mySlot}-${i}`);
+  }
+  if (effectFlow && effectFlow.viewed && effectFlow.viewed.length) {
+    effectFlow.viewed.forEach((vc) => {
+      const i = opp.grid.findIndex((c) => c && c.id === vc.id);
+      if (i !== -1) selectedKeys.add(`${opp.slot}-${i}`);
+    });
+  }
+  const oppEffectActive = room.pendingEffect && room.pendingEffect.by !== mySlot;
+  const myGiveActive = room.pendingGive && room.pendingGive.from === mySlot && me.grid.some(Boolean);
+
+  return (
+    <div className="min-h-screen flex flex-col" style={roomStyle}>
+      <AnimStyles />
+      {/* header */}
+      <div className="flex items-center justify-between px-4 py-2 text-xs" style={{ color: C.muted }}>
+        <span>Round {room.round}/5</span>
+        <button onClick={() => setShowRules(true)} className="flex items-center gap-1"><Info size={13} /> Rules</button>
+        <span style={{ fontVariantNumeric: "tabular-nums" }}>You {me.score} · {opp.name} {opp.score}</span>
+      </div>
+
+      {/* opponent */}
+      <div className="flex flex-col items-center py-2">
+        <div className="text-sm mb-2 flex items-center gap-2" style={{ color: room.turn === opp.slot ? C.goldSoft : C.muted }}>
+          {opp.name || "Opponent"} {room.kabulCalledBy === opp.slot && "· KABUL"} {room.turn === opp.slot && !room.kabulCalledBy && "· their turn"}
+        </div>
+        <CardGridStack cards={opp.grid} faceUp={false} size="sm" onTap={(c, i) => handleGridTap(opp.slot, c, i)} slot={opp.slot} flashSet={flashKeys} selectedSet={selectedKeys} anchorFor={anchorFor} />
+      </div>
+
+      {/* middle: piles */}
+      <div className="flex-1 flex flex-col items-center justify-center gap-4 py-4">
+        {oppDeciding && <p className="text-xs" style={{ color: C.muted }}>{opp.name} is deciding…</p>}
+        {oppEffectActive && <p className="text-xs" style={{ color: C.muted }}>{opp.name} is using the {room.pendingEffect.effect ? "card's" : ""} power…</p>}
+        {myGiveActive && <p className="text-xs font-semibold" style={{ color: C.goldSoft }}>Choose a card below to hand over</p>}
+        {myEffectActive && !stackMode && <p className="text-xs font-semibold text-center px-6" style={{ color: C.goldSoft }}>{effectPrompt(effectFlow)}</p>}
+        {myEffectActive && stackMode && <p className="text-xs font-semibold text-center px-6" style={{ color: C.goldSoft }}>Stacking — turn Stack off to pick up your power-up where you left off.</p>}
+
+        <div className="flex items-center gap-6">
+          <div className="flex flex-col items-center gap-1">
+            <PlayingCard card={room.drawPile[0] ? { id: "back" } : null} faceUp={false} onClick={iCanAct ? () => handleDrawFrom("deck") : undefined} anchor={anchorFor("deck")} />
+            <span className="text-xs" style={{ color: C.muted }}>{room.drawPile.length} left</span>
+          </div>
+          <div className="flex flex-col items-center gap-1">
+            <PlayingCard card={discardTop} faceUp={true} onClick={iCanAct && discardTop ? () => handleDrawFrom("discard") : undefined} anchor={anchorFor("discard")} />
+            <span className="text-xs" style={{ color: C.muted }}>discard</span>
+          </div>
+          {room.drawnCard && (
+            <div className="flex flex-col items-center gap-1">
+              <PlayingCard card={room.drawnCard} faceUp={room.drawnBy === mySlot} highlight anchor={anchorFor("drawn")} />
+              <span className="text-xs" style={{ color: C.muted }}>drawn</span>
+            </div>
+          )}
+        </div>
+
+        {iAmDeciding && (
+          <div className="flex flex-col items-center gap-2 mt-1">
+            <p className="text-xs text-center max-w-xs" style={{ color: C.goldSoft }}>Tap a card below to swap it in, or discard what you drew.</p>
+            <button onClick={handleDiscardDrawn} className="px-5 py-2 rounded-lg text-sm font-semibold" style={{ background: "transparent", border: `1px solid ${C.gold}`, color: C.goldSoft }}>
+              Discard drawn card
+            </button>
+          </div>
+        )}
+
+        {myKabulWindow && (
+          <p className="text-xs font-semibold text-center px-6" style={{ color: C.goldSoft }}>
+            Last chance to call Kabul — {kabulSecsLeft}s
+          </p>
+        )}
+        {kabulWindowOpen && !myKabulWindow && (
+          <p className="text-xs text-center px-6" style={{ color: C.muted }}>
+            {opp.name} still has a moment to call Kabul…
+          </p>
+        )}
+
+        {myTurn && room.phase === "playing" && !room.drawnCard && !room.kabulCalledBy && !room.pendingEffect && (
+          <p className="text-xs" style={{ color: C.goldSoft }}>Your turn — draw from the deck or discard pile.</p>
+        )}
+        {room.phase === "kabul-final" && myTurn && (
+          <p className="text-xs font-semibold" style={{ color: "#d99a85" }}>Final turn! Kabul was called.</p>
+        )}
+      </div>
+
+      {/* my grid */}
+      <div className="flex flex-col items-center pb-3">
+        <div style={{ marginBottom: "0.5rem" }}>
+          <CardGridStack cards={me.grid} faceUp={false} onTap={(c, i) => handleGridTap(mySlot, c, i)} slot={mySlot} flashSet={flashKeys} selectedSet={selectedKeys} anchorFor={anchorFor} />
+        </div>
+        <div className="text-sm" style={{ color: myTurn ? C.goldSoft : C.muted }}>
+          You {room.kabulCalledBy === mySlot && "· KABUL called"} {myTurn && !room.kabulCalledBy && room.phase === "playing" && "· your turn"}
+        </div>
+      </div>
+
+      {/* action bar */}
+      <div className="flex items-center justify-center gap-3 px-4 py-3" style={{ background: "linear-gradient(180deg, rgba(26,18,14,0.35), rgba(26,18,14,0.6))", borderTop: "1px solid rgba(192,138,78,0.12)" }}>
+        <button
+          onClick={() => setStackMode((v) => !v)}
+          disabled={!canStack || godMode}
+          className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-sm font-semibold disabled:opacity-25"
+          style={{ background: stackMode ? C.gold : "transparent", color: stackMode ? C.feltDeep : C.goldSoft, border: `1px solid ${C.gold}` }}
+        >
+          <Layers size={15} /> {stackMode ? "Stack: ON" : "Stack: off"}
+        </button>
+        <button
+          onClick={handleCallKabul}
+          disabled={!canKabul}
+          className="px-5 py-2.5 rounded-xl text-sm font-bold disabled:opacity-25"
+          style={{ background: `linear-gradient(180deg, #ad5f50, ${C.danger})`, color: "#fdf3ec", boxShadow: "0 4px 12px rgba(158,83,70,0.3)" }}
+        >
+          {myKabulWindow ? `Call Kabul (${kabulSecsLeft})` : "Call Kabul"}
+        </button>
+      </div>
+
+      {stackMode && !godMode && (
+        <p className="text-center text-xs pb-2" style={{ background: "rgba(26,18,14,0.55)", color: C.goldSoft }}>
+          {room.firstDiscardDone
+            ? "Stack mode is on. Tap any card — yours or theirs — that matches the discard's rank. Stays on until you turn it off."
+            : "Careful — the round hasn't been played yet. Stacking the opening card costs you a penalty."}
+        </p>
+      )}
+
+      {godMode && (
+        <p className="text-center text-xs pb-2" style={{ background: "rgba(62,34,84,0.75)", color: C.goldSoft }}>
+          God mode — tap any card on either side to remove it. Turn off when you're done.
+        </p>
+      )}
+
+      {/* God mode: a fix-it switch, parked out of the way on the right edge */}
+      <button
+        onClick={() => { setGodMode((v) => !v); setStackMode(false); }}
+        className="fixed font-semibold"
+        style={{
+          right: 0, top: "50%", transform: "translateY(-50%)",
+          zIndex: 40,
+          background: godMode
+            ? "linear-gradient(180deg, #7c4ea8, #5e3782)"
+            : "linear-gradient(180deg, #5e3782, #45275f)",
+          color: C.goldSoft,
+          border: `1px solid ${godMode ? C.goldSoft : "rgba(232,196,143,0.35)"}`,
+          borderRight: "none",
+          borderTopLeftRadius: "0.75rem",
+          borderBottomLeftRadius: "0.75rem",
+          padding: "0.6rem 0.55rem",
+          fontSize: "0.68rem",
+          letterSpacing: "0.08em",
+          writingMode: "vertical-rl",
+          boxShadow: godMode
+            ? "0 0 16px 3px rgba(124,78,168,0.55)"
+            : "0 4px 12px rgba(20,12,8,0.4)",
+        }}
+      >
+        GOD MODE
+      </button>
+
+      {/* activity log */}
+      <details className="px-4 pb-4" style={{ color: C.muted }}>
+        <summary className="text-xs cursor-pointer">Activity log</summary>
+        <div className="text-xs mt-2 space-y-1 max-h-28 overflow-y-auto">
+          {room.log.slice(-8).map((l, i) => <div key={i}>{l}</div>)}
+        </div>
+      </details>
+
+      {/* modals */}
+      {modal && (
+        <Modal title="Card revealed" onClose={closeModal} closeLabel={modal.continueFlow ? "Continue" : "Got it"}>
+          <div className="flex gap-3 justify-center">
+            {modal.cards.map((c, i) => <RevealCard key={i} card={c} delay={i * 160} />)}
+          </div>
+        </Modal>
+      )}
+
+      {myGiveActive && (
+        <Modal title="Hand over a card" z={80}>
+          <p className="text-sm mb-3" style={{ color: C.ink }}>You stacked a card from {nameOf(room, room.pendingGive.to)}'s hand! Choose one of your own cards to hand over to them.</p>
+          <CardGridStack cards={me.grid} faceUp={false} onTap={(c) => handleGiveCard(c.id)} />
+        </Modal>
+      )}
+
+      {showRules && <RulesModal onClose={() => setShowRules(false)} />}
+
+      {flights.map((f) => (
+        <Flight key={f.id} flight={f} onDone={() => setFlights((prev) => prev.filter((x) => x.id !== f.id))} />
+      ))}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------- */
+function RulesModal({ onClose }) {
+  return (
+    <Modal title="How to play Kabul" onClose={onClose}>
+      <div className="text-sm space-y-2 max-h-96 overflow-y-auto" style={{ color: C.ink }}>
+        <p>Each player gets 4 face-down cards. Peek at your bottom two once, then remember them — lower total value wins.</p>
+        <p>On your turn, draw from the deck or the discard pile. Either swap it into your grid (the old card is discarded, no power) or discard it directly — if it has a power, you get to use it. Any 7 or 8 peeks at one of your own cards; any 9 or 10 peeks at one of theirs. The black J, Q and K add swaps on top.</p>
+        <p>Anytime, either player can "Stack" a card of matching rank from any grid onto the discard pile — yours to shed a card, or an opponent's to remove one of theirs (you then hand them a card of your own choosing as a replacement). Guess wrong and you pick up a penalty card. You also can't stack off the card flipped at the start of a round: the first play must be a real turn, and stacking before that is an automatic penalty card.</p>
+        <p>Call "Kabul" on your turn instead of drawing. Your hand locks, your opponent gets one last turn, then everyone reveals. If you had the lowest hand: −10. If not: you +5, they −5. Ties break on lowest individual card. Powers and stacking are both switched off during that final turn, so nobody can touch the locked hand.</p>
+        <p>Lowest total score after 5 rounds wins the match.</p>
+        <p className="text-xs italic pt-1" style={{ color: "#8a7461" }}>House rules added where the original notes were silent: wrong stack guesses draw a penalty card, and Kabul fully locks stacking for the rest of the round.</p>
+      </div>
+    </Modal>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<KabulGame />);
+
+</script>
+</body>
+</html>
