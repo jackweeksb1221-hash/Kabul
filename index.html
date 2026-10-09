@@ -719,9 +719,9 @@ function effectPrompt(flow) {
   return map[key] || null;
 }
 
-function CardGridStack({ cards, faceUp, size, onTap, slot, flashSet, anchorFor, selectedSet }) {
+function CardGridStack({ cards, faceUp, size, onTap, slot, flashSet, anchorFor, selectedSet, flip }) {
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(2, max-content)", gap: "0.5rem", width: "fit-content", margin: "0 auto" }}>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(2, max-content)", gap: "0.5rem", width: "fit-content", margin: "0 auto", ...(flip ? { transform: "rotate(180deg)" } : {}) }}>
       {cards.map((c, i) => (
         <PlayingCard
           key={i} card={c} faceUp={faceUp} size={size}
@@ -1080,9 +1080,13 @@ function KabulGame() {
 
   async function handleStackTap(targetSlot, cardId) {
     await updateRoom((s) => {
-      // stacking is live at any time until Kabul locks the round; it does not
-      // care whose turn it is, or whether a draw or power-up is in progress
-      if (s.phase !== "playing" || s.pendingGive) return s;
+      // stacking is live during play, and — after Kabul is called — for the
+      // other player only, on their own cards. The caller's hand is locked and
+      // cannot be touched by anyone. It does not care whose turn it is, or
+      // whether a draw or power-up is in progress.
+      const kabulFinal = s.phase === "kabul-final";
+      if ((s.phase !== "playing" && !kabulFinal) || s.pendingGive) return s;
+      if (kabulFinal && (s.kabulCalledBy === mySlot || targetSlot !== mySlot)) return s;
       const top = s.discardPile[s.discardPile.length - 1];
       const players = s.players.map((p) => ({ ...p, grid: [...p.grid] }));
       const targetP = players.find((p) => p.slot === targetSlot);
@@ -1423,7 +1427,11 @@ function KabulGame() {
 
   async function botMaybeStack() {
     await updateRoom((s) => {
-      if (s.phase !== "playing" || s.pendingGive || !s.firstDiscardDone) return s;
+      // after Kabul is called, the bot may only stack its own cards — and only
+      // if it wasn't the caller. The caller's hand is locked.
+      const kabulFinal = s.phase === "kabul-final";
+      if ((s.phase !== "playing" && !kabulFinal) || s.pendingGive || !s.firstDiscardDone) return s;
+      if (kabulFinal && s.kabulCalledBy === BOT_SLOT) return s;
       const top = s.discardPile[s.discardPile.length - 1];
       if (!top) return s;
       const known = s.botKnown || {};
@@ -1442,6 +1450,8 @@ function KabulGame() {
           log: [...s.log, `${nameOf(s, BOT_SLOT)} stacked a ${card.rank}${SUIT_SYMBOL[card.suit]} from its own cards.`],
         };
       }
+      // once Kabul is called, the human's hand is locked — never stack from it
+      if (kabulFinal) return s;
       const card = human.grid[oppIdx];
       human.grid[oppIdx] = null;
       return {
@@ -1501,7 +1511,9 @@ function KabulGame() {
 
   useEffect(() => {
     if (mode !== "bot" || !room) return;
-    if (room.phase !== "playing" || room.drawnCard || room.pendingGive || !room.discardPile.length) return;
+    // the bot may stack during play, and — as the non-caller — its own cards after Kabul
+    const stackPhase = room.phase === "playing" || (room.phase === "kabul-final" && room.kabulCalledBy !== BOT_SLOT);
+    if (!stackPhase || room.drawnCard || room.pendingGive || !room.discardPile.length) return;
     const topId = room.discardPile[room.discardPile.length - 1].id;
     if (botStackSeenRef.current === topId) return;
     const t = setTimeout(() => { botStackSeenRef.current = topId; botMaybeStack(); }, 700 + Math.random() * 600);
@@ -1509,6 +1521,15 @@ function KabulGame() {
   }, [mode, botSig]);
 
   /* ---------------- board tap dispatch ---------------- */
+  // tell the room (so the opponent sees it in the activity log) exactly which
+  // of their cards was just checked with a peek power
+  async function logCheck(cards) {
+    const names = cards.map((c) => `${c.rank}${SUIT_SYMBOL[c.suit]}`).join(" and ");
+    await updateRoom((s) => {
+      const oppSlot = mySlot === "p1" ? "p2" : "p1";
+      return { ...s, log: [...s.log, `${nameOf(s, mySlot)} checked ${nameOf(s, oppSlot)}'s ${names}.`] };
+    });
+  }
   function handleEffectFlowTap(targetSlot, card) {
     setEffectFlow((flow) => {
       if (!flow) return flow;
@@ -1523,6 +1544,7 @@ function KabulGame() {
         case "view-opp":
           if (flow.stage === "pick" && !isOwn) {
             setModal({ cards: [card] });
+            logCheck([card]);
             return { ...flow, stage: "done" };
           }
           return flow;
@@ -1533,6 +1555,7 @@ function KabulGame() {
         case "view1-swap":
           if (flow.stage === "pick-view" && !isOwn) {
             setModal({ cards: [card], continueFlow: true });
+            logCheck([card]);
             return { ...flow, stage: "pick-own" };
           }
           if (flow.stage === "pick-own" && isOwn) return { ...flow, stage: "pick-opp", ownId: card.id };
@@ -1541,6 +1564,7 @@ function KabulGame() {
         case "view2-swap":
           if (flow.stage === "pick-view" && !isOwn) {
             const viewed = [...(flow.viewed || []), card];
+            logCheck([card]);
             if (viewed.length < 2) return { ...flow, viewed };
             setModal({ cards: viewed, continueFlow: true });
             return { ...flow, stage: "pick-own", viewed };
@@ -1587,7 +1611,9 @@ function KabulGame() {
       return;
     }
     if (stackMode) {
-      if (!room.pendingGive && room.phase === "playing") {
+      const stackOpen = !room.pendingGive
+        && (room.phase === "playing" || (room.phase === "kabul-final" && room.kabulCalledBy !== mySlot));
+      if (stackOpen) {
         markTapped(key);
         handleStackTap(targetSlot, card.id);
       }
@@ -1890,7 +1916,7 @@ function KabulGame() {
   const iAmDeciding = room.drawnCard && room.drawnBy === mySlot;
   const oppDeciding = room.drawnCard && room.drawnBy !== mySlot;
   const iCanAct = myTurn && !room.drawnCard && !room.pendingEffect && !room.pendingGive && !kabulWindowOpen;
-  const canStack = room.phase === "playing" && !room.pendingGive;
+  const canStack = (room.phase === "playing" || (room.phase === "kabul-final" && room.kabulCalledBy !== mySlot)) && !room.pendingGive;
   const canKabul = room.phase === "playing" && !room.kabulCalledBy && !room.drawnCard && !room.pendingEffect
     && (myKabulWindow || (myTurn && !room.pendingGive && !kabulWindowOpen));
   const myEffectActive = room.pendingEffect && room.pendingEffect.by === mySlot;
@@ -1927,7 +1953,7 @@ function KabulGame() {
         <div className="text-sm mb-2 flex items-center gap-2" style={{ color: room.turn === opp.slot ? C.goldSoft : C.muted }}>
           {opp.name || "Opponent"} {room.kabulCalledBy === opp.slot && "· KABUL"} {room.turn === opp.slot && !room.kabulCalledBy && "· their turn"}
         </div>
-        <CardGridStack cards={opp.grid} faceUp={false} size="sm" onTap={(c, i) => handleGridTap(opp.slot, c, i)} slot={opp.slot} flashSet={flashKeys} selectedSet={selectedKeys} anchorFor={anchorFor} />
+        <CardGridStack cards={opp.grid} faceUp={false} size="sm" flip onTap={(c, i) => handleGridTap(opp.slot, c, i)} slot={opp.slot} flashSet={flashKeys} selectedSet={selectedKeys} anchorFor={anchorFor} />
       </div>
 
       {/* middle: piles */}
@@ -2015,9 +2041,13 @@ function KabulGame() {
 
       {stackMode && !godMode && (
         <p className="text-center text-xs pb-2" style={{ background: "rgba(26,18,14,0.55)", color: C.goldSoft }}>
-          {room.firstDiscardDone
-            ? "Stack mode is on. Tap any card — yours or theirs — that matches the discard's rank. Stays on until you turn it off."
-            : "Careful — the round hasn't been played yet. Stacking the opening card costs you a penalty."}
+          {room.phase === "kabul-final"
+            ? (room.kabulCalledBy === mySlot
+              ? "Kabul is called — hands are locked, stacking is off for the rest of the round."
+              : "Kabul was called — their hand is locked, but you can still stack your own matching cards.")
+            : room.firstDiscardDone
+              ? "Stack mode is on. Tap any card — yours or theirs — that matches the discard's rank. Stays on until you turn it off."
+              : "Careful — the round hasn't been played yet. Stacking the opening card costs you a penalty."}
         </p>
       )}
 
@@ -2095,9 +2125,9 @@ function RulesModal({ onClose }) {
         <p>Each player gets 4 face-down cards. Peek at your bottom two once, then remember them — lower total value wins.</p>
         <p>On your turn, draw from the deck or the discard pile. Either swap it into your grid (the old card is discarded, no power) or discard it directly — if it has a power, you get to use it. Any 7 or 8 peeks at one of your own cards; any 9 or 10 peeks at one of theirs. The black J, Q and K add swaps on top.</p>
         <p>Anytime, either player can "Stack" a card of matching rank from any grid onto the discard pile — yours to shed a card, or an opponent's to remove one of theirs (you then hand them a card of your own choosing as a replacement). Guess wrong and you pick up a penalty card. You also can't stack off the card flipped at the start of a round: the first play must be a real turn, and stacking before that is an automatic penalty card.</p>
-        <p>Call "Kabul" on your turn instead of drawing. Your hand locks, your opponent gets one last turn, then everyone reveals. If you had the lowest hand: −10. If not: you +5, they −5. Ties break on lowest individual card. Powers and stacking are both switched off during that final turn, so nobody can touch the locked hand.</p>
+        <p>Call "Kabul" on your turn instead of drawing. Your hand locks, your opponent gets one last turn, then everyone reveals. If you had the lowest hand: −10. If not: you +5, they −5. Ties break on lowest individual card. Powers are switched off during that final turn, and nobody can touch the caller's locked hand — but the other player may still stack matching cards from their own hand.</p>
         <p>Lowest total score after 5 rounds wins the match.</p>
-        <p className="text-xs italic pt-1" style={{ color: "#8a7461" }}>House rules added where the original notes were silent: wrong stack guesses draw a penalty card, and Kabul fully locks stacking for the rest of the round.</p>
+        <p className="text-xs italic pt-1" style={{ color: "#8a7461" }}>House rules added where the original notes were silent: wrong stack guesses draw a penalty card, and after Kabul the other player may still stack their own cards, but never the caller's.</p>
       </div>
     </Modal>
   );
